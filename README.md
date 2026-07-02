@@ -25,12 +25,9 @@ plugins.
 
 ## Install
 
-Not on PyPI yet; from a checkout:
-
 ```bash
-git clone git@github.com:CaliforniaOpenSource/tellmphone.git
-cd tellmphone
-uv run tellmphone install
+uv tool install tellmphone   # or: pipx install tellmphone
+tellmphone install
 ```
 
 `install` registers the MCP server with every agent CLI it finds — via
@@ -118,13 +115,6 @@ Transcripts contain whatever flowed through the conversation, which for a
 coding agent usually includes your code. Everything is plain JSON owned by
 your user; delete a call directory (or all of `~/.tellmphone/`) to purge.
 
-## Adding another agent
-
-Adapters implement a three-method interface (`available`, `spawn`, `resume`)
-plus optional install hooks, and register via the `tellmphone.adapters`
-entry-point group — a separate package can add an agent without touching
-this one. See `src/tellmphone/adapters/`.
-
 ## Development
 
 ```bash
@@ -133,12 +123,8 @@ uv run pytest
 ```
 
 The test suite runs against fake `claude`/`codex` executables, so it needs
-neither CLI installed nor network.
-
-## Status
-
-Alpha. Works with Claude Code and Codex on macOS and Linux; no Windows
-support yet (file locking is POSIX-only). Not yet published to PyPI.
+neither CLI installed nor network. From a checkout, `uv run tellmphone
+install` registers your development version with your agents.
 
 ---
 
