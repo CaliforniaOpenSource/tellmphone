@@ -1,139 +1,132 @@
-# TeLLMphone ☎️
+# TeLLMphone
 
-**Let your LLMs call each other.**
+A local MCP server that lets coding agents call each other. Claude Code can
+hand Codex a question about the current project and get an answer back, keep
+that conversation going across multiple turns, or leave a message for the
+next Codex session to pick up. Conversations survive interruptions on both
+sides, and the callee can be given a saved personality and a specific model.
 
-TeLLMphone is a Python library that ships a local MCP server letting one coding
-agent (Claude Code, Codex, …) place a "call" to another: hand over the project
-directory and some context, get a response back, and keep the conversation going
-across multiple turns — even if either side's session gets interrupted.
+Currently supports Claude Code and Codex; other agents can be added as
+plugins.
 
-> Claude, mid-task: *"Let me get a second opinion on this migration."*
-> → `call(callee="codex", personality="grumpy-reviewer", message="Review this schema change…")`
-> → Codex runs headlessly in the same project, replies, and the thread stays open
-> for follow-ups.
+## Requirements
 
-## Why
+- macOS or Linux
+- Python 3.11+ and [uv](https://docs.astral.sh/uv/)
+- The agent CLIs you want to connect (`claude`, `codex`), installed and
+  logged in
 
-- **Second opinions.** Different models have different blind spots. A one-tool
-  call to "ask the other guy" is cheaper than a human copy-pasting between
-  terminals.
-- **Delegation.** Hand a subtask to another agent in the same working directory
-  and pick up the result later.
-- **Personalities.** The caller doesn't write system prompts inline. It picks a
-  named, locally saved personality ("grumpy-reviewer", "security-auditor",
-  "rubber-duck") and TeLLMphone injects it on the callee side, consistently
-  across the whole call.
-- **Model choice, separate from personality.** A call can pin which model the
-  callee runs (`model="gpt-5.5"`, `model="opus"`) independently of how it
-  behaves. The model is pinned per call — follow-ups keep talking to the same
-  brain — with per-agent defaults in config.
-- **Answering machine.** Agents can check whether another agent left them
-  messages for the current project, and reply — asynchronous, survives session
-  restarts on both ends.
+## Install
 
-## How it works (30-second version)
+Not on PyPI yet; from a checkout:
+
+```bash
+git clone git@github.com:CaliforniaOpenSource/tellmphone.git
+cd tellmphone
+uv run tellmphone install
+```
+
+`install` registers the MCP server with every agent CLI it finds — via
+`claude mcp add` and `codex mcp add` — and sets the codex config needed for
+non-interactive tool approval. It is idempotent; rerun it if you move the
+checkout. `tellmphone uninstall` removes the registrations (it does not
+delete `~/.tellmphone/`).
+
+## Usage
+
+You talk to your agent; your agent works the phone. In a Claude Code
+session:
+
+> Call codex and get a second opinion on this migration. Use the
+> grumpy-reviewer personality.
+
+Claude will place the call, relay the answer, and can keep the thread going
+with follow-ups. In the other direction, start a Codex session in the same
+project and ask it to check its messages.
+
+The tools the agents get:
+
+| Tool | What it does |
+|---|---|
+| `call` | Send a message to another agent about a project. Optional personality and model. Waits for the answer, or leaves it as voicemail. |
+| `reply` | Follow up on an existing call. The callee resumes with full context. |
+| `check_messages` | List unread messages and open calls for a project. |
+| `hang_up` | Close a call. The transcript is kept. |
+| `phonebook` | List available agents and personalities. |
+
+## How it works
 
 ```
 ┌─────────────┐   MCP (stdio)   ┌──────────────────┐   headless CLI   ┌─────────────┐
 │ Claude Code │ ──────────────► │   TeLLMphone     │ ───────────────► │ codex exec  │
 │  (caller)   │  call/reply/…   │   switchboard    │  spawn / resume  │  (callee)   │
-└─────────────┘                 │                  │                  └─────────────┘
-                                │  ~/.tellmphone/  │
-                                │  calls, mailbox, │
-                                │  personalities   │
-                                └──────────────────┘
+└─────────────┘                 └──────────────────┘                  └─────────────┘
 ```
 
-- Each agent runs TeLLMphone as a plain **stdio MCP server**; there is no
-  daemon. Shared state lives on disk under `~/.tellmphone/`.
-- A **call** spawns the callee's CLI headlessly (`codex exec`, `claude -p`),
-  captures the callee's native **session id**, and stores the mapping under a
-  stable **call id**. Replies resume that exact session
-  (`codex exec resume <id>`, `claude --resume <id>`), so context is never lost.
-- The **call id is the only thing the caller needs to remember** — and it
-  doesn't even need to remember it, because `check_messages(project_dir)`
-  lists open calls and unread replies for the project.
+There is no daemon. Each agent runs its own TeLLMphone instance over stdio;
+shared state lives under `~/.tellmphone/`. A call spawns the callee's CLI
+headlessly (`codex exec`, `claude -p`) in the project directory, records the
+callee's native session id under a stable call id, and replies resume that
+exact session (`codex exec resume`, `claude --resume`). If a native session
+is lost, the stored transcript is replayed into a fresh one. Callees run in
+their CLI's read-only/sandboxed mode unless you allowlist a project for
+writes, and a hop limit keeps agents from chaining calls indefinitely.
 
-## The tools (planned surface)
+Details, including the security model, are in [docs/DESIGN.md](docs/DESIGN.md).
 
-| Tool | What it does |
-|---|---|
-| `call` | Place a call: callee, message, project dir, optional personality and model. Waits for the answer (or drops to voicemail if it takes too long). |
-| `reply` | Send a follow-up on an existing call id; resumes the callee's session. |
-| `check_messages` | "Any messages for me in this project?" Lists incoming calls, unread replies, and open threads. |
-| `hang_up` | Close a call. The transcript is kept. |
-| `phonebook` | List available agents (adapters) and personalities. |
+## Configuration
 
-See [docs/DESIGN.md](docs/DESIGN.md) for the full architecture: call lifecycle,
-session-id matching, the personality system, the mailbox protocol, adapter
-interface, and security model.
-
-## Supported agents
-
-| Agent | Adapter | Status |
-|---|---|---|
-| Claude Code | `claude` (headless `claude -p` + `--resume`) | planned, v0.1 |
-| Codex | `codex` (`codex exec` + `exec resume`) | planned, v0.1 |
-| others | plugin adapters via Python entry points | open to contributions |
-
-## Setup
-
-One command registers the MCP server with every agent CLI it finds:
-
-```bash
-uv run --project /path/to/tellmphone tellmphone install
-```
-
-Each adapter knows how to plug into its own agent — `claude mcp add` for
-Claude (user scope), `codex mcp add` plus the tool-approval config codex
-needs for non-interactive tool calls. `tellmphone uninstall` reverses it;
-`--agent NAME` limits either to specific agents. Registration is idempotent —
-rerun `install` after moving the checkout.
-
-Starter personalities are installed to `~/.tellmphone/personalities/` on first
-run; add your own as Markdown files there. Everything else lives in
 `~/.tellmphone/config.toml`:
 
 ```toml
 [defaults]
-timeout_s = 300
-max_hops = 2
+timeout_s = 300   # wait this long before a live call rolls to voicemail
+max_hops = 2      # agent-to-agent chain depth limit
 
-# default model per callee agent; a call's explicit `model` argument wins
+# default model per callee; a call's explicit model argument wins.
+# Use whatever model ids your CLI accepts.
 [agents.codex]
 model = "gpt-5.5"
 
-[agents.claude]
-model = "sonnet"
-
-# callees run read-only unless a project is allowlisted here (humans only)
+# callees run read-only unless a project is allowlisted here
 [permissions."/path/to/project"]
 write = true
 ```
 
+Personalities are Markdown files in `~/.tellmphone/personalities/` with a
+small frontmatter block (`name`, `description`) followed by the system
+prompt. Three starters are installed on first run (`grumpy-reviewer`,
+`security-auditor`, `rubber-duck`); add your own alongside them. Callers
+select personalities by name and never send system prompts inline.
+
+## Data
+
+Call records and transcripts live under `~/.tellmphone/projects/`.
+Transcripts contain whatever flowed through the conversation, which for a
+coding agent usually includes your code. Everything is plain JSON owned by
+your user; delete a call directory (or all of `~/.tellmphone/`) to purge.
+
+## Adding another agent
+
+Adapters implement a three-method interface (`available`, `spawn`, `resume`)
+plus optional install hooks, and register via the `tellmphone.adapters`
+entry-point group — a separate package can add an agent without touching
+this one. See `src/tellmphone/adapters/`.
+
+## Development
+
+```bash
+uv sync
+uv run pytest
+```
+
+The test suite runs against fake `claude`/`codex` executables, so it needs
+neither CLI installed nor network.
+
 ## Status
 
-🚧 **v0.1 implemented, pre-release.** All five tools work (39 passing tests),
-and **both adapters are live-verified** end to end against the real CLIs:
-headless call, session-id capture, native session resume, personality
-injection, model pinning, and the answering-machine flow. Not yet on PyPI.
-Start with [docs/DESIGN.md](docs/DESIGN.md).
-
-## FAQ
-
-**Is this an MCP server or a skill?**
-The core is an MCP server — that's what gives agents actual callable tools.
-Skills can't execute anything; they're instructions that teach an agent *when*
-and *how* to use tools. TeLLMphone will optionally ship a small companion skill
-for Claude (and an `AGENTS.md` snippet for Codex) that teaches good phone
-etiquette: when a second opinion is worth the tokens, how to write a good ask,
-and to check messages when starting work in a project.
-
-**Why "TeLLMphone"?**
-Because the LLMs are on the phone. The internals lean into it: the switchboard
-routes calls, the phonebook lists who you can dial, voicemail holds messages
-for agents that aren't running, and hop limits stop two agents from playing
-telephone forever.
+Alpha. Works with Claude Code and Codex on macOS and Linux; no Windows
+support yet (file locking is POSIX-only). Not yet published to PyPI.
 
 ---
 

@@ -1,10 +1,8 @@
 # TeLLMphone — Design
 
-Status: **draft, pre-implementation** (2026-07-02)
-
-This document is the source of truth for the architecture. Anything marked
-`[verify]` is a CLI detail that must be confirmed against the installed
-versions of `claude` and `codex` before implementation.
+Status: **implemented (v0.1)** — written before implementation, updated as
+built; §13 records what implementation taught us. `[verify]` markers on CLI
+details are resolved there.
 
 ## 1. Goals
 
