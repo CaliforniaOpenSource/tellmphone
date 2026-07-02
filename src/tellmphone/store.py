@@ -56,7 +56,7 @@ class CallRecord(BaseModel):
 class TranscriptEntry(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    seq: int
+    seq: int = 0  # 0 = unassigned; append_transcript assigns the real seq
     from_: str = Field(alias="from")
     to: str
     body: str
@@ -160,11 +160,25 @@ class Store:
 
     # -- transcripts ---------------------------------------------------------
 
-    def append_transcript(self, call_id: str, entry: TranscriptEntry) -> None:
+    def append_transcript(self, call_id: str, entry: TranscriptEntry) -> TranscriptEntry:
+        """Append one entry, assigning its seq atomically.
+
+        Seq assignment and the write happen under an exclusive flock on the
+        transcript file itself (not call.lock, which is not reentrant), so
+        concurrent writers can never share a seq or interleave lines.
+        """
         path = self.call_dir(call_id) / "transcript.jsonl"
         with open(path, "a") as fh:
-            fh.write(entry.model_dump_json(by_alias=True) + "\n")
+            fcntl.flock(fh, fcntl.LOCK_EX)
+            try:
+                transcript = self.read_transcript(call_id)
+                entry.seq = transcript[-1].seq + 1 if transcript else 1
+                fh.write(entry.model_dump_json(by_alias=True) + "\n")
+                fh.flush()
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
         os.chmod(path, 0o600)
+        return entry
 
     def read_transcript(self, call_id: str) -> list[TranscriptEntry]:
         path = self.call_dir(call_id) / "transcript.jsonl"
@@ -175,10 +189,6 @@ class Store:
             for line in path.read_text().splitlines()
             if line.strip()
         ]
-
-    def next_seq(self, call_id: str) -> int:
-        transcript = self.read_transcript(call_id)
-        return transcript[-1].seq + 1 if transcript else 1
 
     # -- locking ---------------------------------------------------------------
 

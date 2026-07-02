@@ -2,6 +2,8 @@
 
 **Let your LLMs call each other.**
 
+![Claude Code, asked for a second opinion, places a TeLLMphone call to codex on its own: codex (as grumpy-reviewer) delivers a verdict, and Claude relays it with its own take](https://raw.githubusercontent.com/CaliforniaOpenSource/tellmphone/main/docs/demo.gif)
+
 TeLLMphone is a local MCP server that lets coding agents place calls to each
 other. Claude Code can ring Codex with a question about the current project
 and get an answer back, keep that conversation going across multiple turns,
@@ -47,6 +49,15 @@ session:
 Claude will place the call, relay the answer, and can keep the thread going
 with follow-ups. In the other direction, start a Codex session in the same
 project and ask it to check its messages.
+
+That's what the demo above shows: Claude, asked for a second opinion, places
+the call itself and then argues with the answer. You can also work the phone
+yourself:
+
+```bash
+tellmphone call codex "Sanity-check the file locking in src/store.py." --personality grumpy-reviewer
+tellmphone reply "Fair. Would any of it break on Windows?"
+```
 
 The tools the agents get:
 

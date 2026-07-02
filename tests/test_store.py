@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from tellmphone.store import (
@@ -51,20 +53,49 @@ def test_project_key_is_stable_and_distinct(tmp_path):
 def test_transcript_append_and_seq(store, project):
     record = make_record(project)
     store.create_call(record)
-    for i, body in enumerate(["hello", "world"], start=1):
-        store.append_transcript(
+    for body in ["hello", "world"]:
+        entry = store.append_transcript(
             record.call_id,
-            TranscriptEntry(
-                seq=store.next_seq(record.call_id),
-                from_="claude", to="codex", body=body, ts=utcnow(),
-            ),
+            TranscriptEntry(from_="claude", to="codex", body=body, ts=utcnow()),
         )
+        assert entry.seq > 0  # append assigns the seq
     transcript = store.read_transcript(record.call_id)
     assert [e.seq for e in transcript] == [1, 2]
     assert transcript[1].body == "world"
     # "from" is the wire name
     raw = (store.call_dir(record.call_id) / "transcript.jsonl").read_text()
     assert '"from":"claude"' in raw.replace(" ", "")
+
+
+def test_concurrent_appends_never_share_a_seq(store, project):
+    """Regression: seq assignment and the write are atomic under the
+    transcript lock, so parallel writers can't duplicate a seq or
+    interleave partial lines."""
+    record = make_record(project)
+    store.create_call(record)
+    n_threads, per_thread = 8, 5
+    barrier = threading.Barrier(n_threads)
+
+    def writer(i):
+        barrier.wait()
+        for j in range(per_thread):
+            store.append_transcript(
+                record.call_id,
+                TranscriptEntry(from_="claude", to="codex", body=f"{i}-{j}", ts=utcnow()),
+            )
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(n_threads)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    transcript = store.read_transcript(record.call_id)  # every line parses
+    total = n_threads * per_thread
+    assert [e.seq for e in transcript] == list(range(1, total + 1))
+    assert {e.body for e in transcript} == {
+        f"{i}-{j}" for i in range(n_threads) for j in range(per_thread)
+    }
 
 
 def test_lock_busy(store, project):

@@ -129,8 +129,9 @@ class Switchboard:
         self._append(record, self.config.i_am, callee, _frame_message(message, context))
 
         if mode == "voicemail":
-            record.unread_for = [callee]
-            self.store.save_call(record)
+            with self.store.call_lock(record.call_id):
+                record.unread_for = [callee]
+                self.store.save_call(record)
             return {
                 "call_id": record.call_id,
                 "status": "voicemail",
@@ -141,9 +142,10 @@ class Switchboard:
             }
 
         if not adapter.available():
-            record.status = "failed"
-            record.last_error = f"{callee} CLI is not installed or not on PATH"
-            self.store.save_call(record)
+            with self.store.call_lock(record.call_id):
+                record.status = "failed"
+                record.last_error = f"{callee} CLI is not installed or not on PATH"
+                self.store.save_call(record)
             return {"call_id": record.call_id, "status": "failed", "error": record.last_error}
 
         req = self._spawn_request(record, _frame_message(message, context), persona)
@@ -291,10 +293,11 @@ class Switchboard:
 
     def hang_up(self, call_id: str, reason: str | None = None) -> dict:
         try:
-            record = self.store.load_call(call_id)
+            self.store.call_dir(call_id)
         except CallNotFound:
             return {"status": "error", "error": f"no call {call_id!r}"}
         with self.store.call_lock(call_id):
+            record = self.store.load_call(call_id)
             record.status = "closed"
             record.closed_reason = reason
             self._append(
@@ -348,16 +351,11 @@ class Switchboard:
             return None  # personality deleted since call started; session has it anyway
 
     def _append(self, record, from_, to, body, kind="message") -> None:
+        # seq is assigned inside append_transcript, atomically under the
+        # transcript's own lock — safe with or without call.lock held.
         self.store.append_transcript(
             record.call_id,
-            TranscriptEntry(
-                seq=self.store.next_seq(record.call_id),
-                from_=from_,
-                to=to,
-                body=body,
-                ts=utcnow(),
-                kind=kind,
-            ),
+            TranscriptEntry(from_=from_, to=to, body=body, ts=utcnow(), kind=kind),
         )
 
     def _replay_prompt(self, record: CallRecord) -> str:
@@ -390,27 +388,38 @@ class Switchboard:
         (open question §14.4 covers the crash case).
         """
         timeout_s = timeout_s or self.config.timeout_s
-        record.status = "ringing"
-        self.store.save_call(record)
+        with self.store.call_lock(record.call_id):
+            record.status = "ringing"
+            self.store.save_call(record)
         result = _TurnResult()
 
         def worker():
+            # The turn can run for minutes; check_messages and hang_up may
+            # commit in between. Reload under the lock and touch only this
+            # turn's fields, so the save can't resurrect cleared unread flags
+            # or reopen a call that was hung up mid-turn.
             try:
                 turn = run()
                 result.ok, result.text, result.usage = True, turn.text, turn.usage
                 with self.store.call_lock(record.call_id):
-                    record.callee.session_id = turn.session_id or record.callee.session_id
-                    record.status = "answered"
-                    self._append(record, record.callee.agent, record.caller.agent, turn.text)
-                    if record.caller.agent not in record.unread_for:
-                        record.unread_for.append(record.caller.agent)
-                    self.store.save_call(record)
+                    fresh = self.store.load_call(record.call_id)
+                    fresh.callee.session_id = turn.session_id or fresh.callee.session_id
+                    if record.resumed_via:
+                        fresh.resumed_via = record.resumed_via
+                    self._append(fresh, fresh.callee.agent, fresh.caller.agent, turn.text)
+                    if fresh.status != "closed":
+                        fresh.status = "answered"
+                        if fresh.caller.agent not in fresh.unread_for:
+                            fresh.unread_for.append(fresh.caller.agent)
+                    self.store.save_call(fresh)
             except AdapterError as exc:
                 result.error = str(exc)
                 with self.store.call_lock(record.call_id):
-                    record.status = "failed"
-                    record.last_error = result.error
-                    self.store.save_call(record)
+                    fresh = self.store.load_call(record.call_id)
+                    fresh.last_error = result.error
+                    if fresh.status != "closed":
+                        fresh.status = "failed"
+                    self.store.save_call(fresh)
 
         thread = threading.Thread(target=worker, daemon=False)
         thread.start()

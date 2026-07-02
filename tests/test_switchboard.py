@@ -98,15 +98,30 @@ def test_reply_resumes_same_session(boards, fake_adapter, project):
     assert fake_adapter.resumes == [("fake-sess-1", "second")]
 
 
-def test_lost_session_falls_back_to_replay(boards, fake_adapter, project):
+def test_lost_session_falls_back_to_replay(boards, fake_adapter, project, store):
     caller, _ = boards
     placed = caller.place_call("fake", "first", project)
     fake_adapter.lose_session = True
     result = caller.reply(placed["call_id"], "second")
     assert result["status"] == "answered"
     assert result["resumed_via"] == "transcript-replay"
+    assert store.load_call(placed["call_id"]).resumed_via == "transcript-replay"
     replay = fake_adapter.spawns[-1].message
     assert "[claude]: first" in replay and "[claude]: second" in replay
+
+
+def test_hang_up_mid_turn_stays_closed(boards, fake_adapter, project, store):
+    caller, _ = boards
+    fake_adapter.delay = 0.4
+    result = caller.place_call("fake", "slow one", project, timeout_s=0.05)
+    assert result["status"] == "ringing"
+    caller.hang_up(result["call_id"], reason="changed my mind")
+    time.sleep(0.6)  # detached worker finishes after the hang-up
+    record = store.load_call(result["call_id"])
+    assert record.status == "closed"  # the late answer must not reopen the call
+    assert record.unread_for == []
+    # the answer itself still lands in the transcript (no data loss)
+    assert any("spawn-reply" in e.body for e in store.read_transcript(result["call_id"]))
 
 
 def test_timeout_goes_to_voicemail(boards, fake_adapter, project, store):
