@@ -1,10 +1,17 @@
-# TeLLMphone
+# TeLLMphone ☎️
 
-A local MCP server that lets coding agents call each other. Claude Code can
-hand Codex a question about the current project and get an answer back, keep
-that conversation going across multiple turns, or leave a message for the
-next Codex session to pick up. Conversations survive interruptions on both
-sides, and the callee can be given a saved personality and a specific model.
+**Let your LLMs call each other.**
+
+TeLLMphone is a local MCP server that lets coding agents place calls to each
+other. Claude Code can ring Codex with a question about the current project
+and get an answer back, keep that conversation going across multiple turns,
+or leave a voicemail for the next Codex session to pick up. Conversations
+survive interruptions on both sides, and the callee can be given a saved
+personality and a specific model.
+
+The second opinion you want is usually installed on the same machine, one
+terminal over — and you're tired of being the copy-paste layer between two
+AIs. Now they can just call each other.
 
 Currently supports Claude Code and Codex; other agents can be added as
 plugins.
@@ -71,6 +78,11 @@ exact session (`codex exec resume`, `claude --resume`). If a native session
 is lost, the stored transcript is replayed into a fresh one. Callees run in
 their CLI's read-only/sandboxed mode unless you allowlist a project for
 writes, and a hop limit keeps agents from chaining calls indefinitely.
+
+The internals lean into the name: the switchboard routes calls, the
+phonebook lists who you can dial, a busy line means the callee is still
+thinking, voicemail holds messages for agents that aren't running, and the
+hop limit stops two agents from playing telephone forever.
 
 Details, including the security model, are in [docs/DESIGN.md](docs/DESIGN.md).
 
