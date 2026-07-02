@@ -1,0 +1,199 @@
+"""On-disk state under ~/.tellmphone/ — the switchboard's memory.
+
+Layout (see docs/DESIGN.md §4):
+
+    ~/.tellmphone/
+    ├── config.toml
+    ├── personalities/*.md
+    └── projects/<slug>-<sha1[:12]>/
+        ├── project.json
+        └── calls/<call_id>/{call.json, call.lock, transcript.jsonl}
+"""
+
+from __future__ import annotations
+
+import fcntl
+import hashlib
+import json
+import os
+import re
+import secrets
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterator, Literal
+
+from pydantic import BaseModel, ConfigDict, Field
+
+CALL_ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"  # no i/l/o/u lookalikes
+
+CallStatus = Literal["ringing", "answered", "voicemail", "closed", "failed"]
+
+
+class Party(BaseModel):
+    agent: str
+    session_id: str | None = None
+    personality: str | None = None
+    personality_hash: str | None = None
+    model: str | None = None  # pinned at call time; every turn of the call uses it
+
+
+class CallRecord(BaseModel):
+    call_id: str
+    project_dir: str
+    caller: Party
+    callee: Party
+    status: CallStatus
+    hop_count: int = 1
+    created_at: datetime
+    last_activity_at: datetime
+    unread_for: list[str] = Field(default_factory=list)
+    closed_reason: str | None = None
+    last_error: str | None = None
+    resumed_via: str | None = None  # "transcript-replay" when the native session was lost
+
+
+class TranscriptEntry(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    seq: int
+    from_: str = Field(alias="from")
+    to: str
+    body: str
+    ts: datetime
+    kind: Literal["message", "system"] = "message"
+
+
+class CallBusy(Exception):
+    """The line is engaged: another process is mid-turn on this call."""
+
+
+class CallNotFound(Exception):
+    pass
+
+
+def utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def new_call_id() -> str:
+    return "call-" + "".join(secrets.choice(CALL_ID_ALPHABET) for _ in range(4))
+
+
+def project_key(project_dir: str | Path) -> str:
+    canonical = str(Path(project_dir).expanduser().resolve())
+    slug = re.sub(r"[^a-z0-9]+", "-", Path(canonical).name.lower()).strip("-") or "project"
+    digest = hashlib.sha1(canonical.encode()).hexdigest()[:12]
+    return f"{slug}-{digest}"
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    tmp = path.with_suffix(path.suffix + f".tmp{os.getpid()}")
+    tmp.write_text(text)
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, path)
+
+
+class Store:
+    def __init__(self, home: Path):
+        self.home = home
+
+    # -- paths -------------------------------------------------------------
+
+    @property
+    def projects_dir(self) -> Path:
+        return self.home / "projects"
+
+    @property
+    def personalities_dir(self) -> Path:
+        return self.home / "personalities"
+
+    def project_box(self, project_dir: str | Path) -> Path:
+        """Ensure and return the state directory for a project."""
+        canonical = str(Path(project_dir).expanduser().resolve())
+        box = self.projects_dir / project_key(canonical)
+        (box / "calls").mkdir(parents=True, exist_ok=True)
+        os.chmod(box, 0o700)
+        marker = box / "project.json"
+        if not marker.exists():
+            _atomic_write(marker, json.dumps({"project_dir": canonical}))
+        return box
+
+    def call_dir(self, call_id: str) -> Path:
+        """Global call_id -> directory lookup (glob scan; volumes are tiny)."""
+        matches = list(self.projects_dir.glob(f"*/calls/{call_id}/call.json"))
+        if not matches:
+            raise CallNotFound(call_id)
+        return matches[0].parent
+
+    # -- call records --------------------------------------------------------
+
+    def create_call(self, record: CallRecord) -> Path:
+        box = self.project_box(record.project_dir)
+        while (box / "calls" / record.call_id).exists():
+            record.call_id = new_call_id()
+        call_dir = box / "calls" / record.call_id
+        call_dir.mkdir(parents=True)
+        os.chmod(call_dir, 0o700)
+        (call_dir / "call.lock").touch(mode=0o600)
+        self.save_call(record)
+        return call_dir
+
+    def save_call(self, record: CallRecord) -> None:
+        record.last_activity_at = utcnow()
+        call_dir = self.project_box(record.project_dir) / "calls" / record.call_id
+        _atomic_write(
+            call_dir / "call.json",
+            record.model_dump_json(by_alias=True, indent=2),
+        )
+
+    def load_call(self, call_id: str) -> CallRecord:
+        call_dir = self.call_dir(call_id)
+        return CallRecord.model_validate_json((call_dir / "call.json").read_text())
+
+    def calls_for_project(self, project_dir: str | Path) -> list[CallRecord]:
+        box = self.project_box(project_dir)
+        records = []
+        for meta in sorted(box.glob("calls/*/call.json")):
+            records.append(CallRecord.model_validate_json(meta.read_text()))
+        return records
+
+    # -- transcripts ---------------------------------------------------------
+
+    def append_transcript(self, call_id: str, entry: TranscriptEntry) -> None:
+        path = self.call_dir(call_id) / "transcript.jsonl"
+        with open(path, "a") as fh:
+            fh.write(entry.model_dump_json(by_alias=True) + "\n")
+        os.chmod(path, 0o600)
+
+    def read_transcript(self, call_id: str) -> list[TranscriptEntry]:
+        path = self.call_dir(call_id) / "transcript.jsonl"
+        if not path.exists():
+            return []
+        return [
+            TranscriptEntry.model_validate_json(line)
+            for line in path.read_text().splitlines()
+            if line.strip()
+        ]
+
+    def next_seq(self, call_id: str) -> int:
+        transcript = self.read_transcript(call_id)
+        return transcript[-1].seq + 1 if transcript else 1
+
+    # -- locking ---------------------------------------------------------------
+
+    @contextmanager
+    def call_lock(self, call_id: str, blocking: bool = True) -> Iterator[None]:
+        """One writer per call. Non-blocking acquisition raises CallBusy."""
+        lock_path = self.call_dir(call_id) / "call.lock"
+        fh = open(lock_path, "w")
+        try:
+            flags = fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB)
+            try:
+                fcntl.flock(fh, flags)
+            except BlockingIOError:
+                raise CallBusy(call_id) from None
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            fh.close()
