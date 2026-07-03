@@ -325,7 +325,7 @@ class Switchboard:
                 for name, adapter in sorted(self.adapters.items())
             ],
             "personalities": [
-                {"name": p.name, "description": p.description}
+                {"name": p.name, "description": p.description, "source": p.source}
                 for p in self.personalities.all()
             ],
         }

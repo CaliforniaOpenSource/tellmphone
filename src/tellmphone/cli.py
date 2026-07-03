@@ -42,7 +42,6 @@ def _make_switchboard(i_am: str):
 
     cfg = load_config(i_am=i_am)
     board = Switchboard(cfg, Store(cfg.home), load_adapters())
-    board.personalities.ensure_starters()
     return board
 
 
@@ -204,9 +203,8 @@ def main(argv: list[str] | None = None) -> int:
         from tellmphone.personalities import PersonalityBook
 
         book = PersonalityBook(tellmphone_home() / "personalities")
-        book.ensure_starters()
         for p in book.all():
-            print(f"{p.name:24} {p.description}")
+            print(f"{p.name:24} {'[' + p.source + ']':10} {p.description}")
         return 0
 
     if args.command == "serve":

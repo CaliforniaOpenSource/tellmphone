@@ -113,11 +113,14 @@ model = "gpt-5.5"
 write = true
 ```
 
-Personalities are Markdown files in `~/.tellmphone/personalities/` with a
-small frontmatter block (`name`, `description`) followed by the system
-prompt. Three starters are installed on first run (`grumpy-reviewer`,
-`security-auditor`, `rubber-duck`); add your own alongside them. Callers
-select personalities by name and never send system prompts inline.
+Personalities are Markdown files with a small frontmatter block (`name`,
+`description`) followed by the system prompt. Eight builtins ship with the package and update with it — critics
+(`grumpy-reviewer`, `security-auditor`, `sycophancy-cop`), thinking partners
+(`rubber-duck`, `devils-advocate`, `architect`), and builders (`debugger`,
+`test-engineer`); your own live in `~/.tellmphone/personalities/`. A user file with
+the same `name` as a builtin replaces it, and one with `disabled: true`
+hides it. Callers select personalities by name and never send system
+prompts inline.
 
 ## Data
 

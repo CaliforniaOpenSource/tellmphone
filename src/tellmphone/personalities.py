@@ -9,6 +9,13 @@ A personality is a Markdown file with YAML-ish frontmatter:
     ---
     You are a grumpy but rigorous senior engineer...
 
+Personalities come from two layers: the package ships builtins in
+tellmphone/data/personalities/, and the user's directory (usually
+~/.tellmphone/personalities/) overlays them. A user file with the same
+name as a builtin replaces it; one with `disabled: true` hides the name
+entirely. Builtins are never copied to disk, so package upgrades reach
+every install.
+
 There is deliberately no MCP tool to write these; agents pick by name only.
 """
 
@@ -31,6 +38,8 @@ class Personality:
     description: str
     body: str
     agents: list[str] = field(default_factory=list)  # empty = any agent
+    source: str = "user"  # "builtin" or "user"
+    disabled: bool = False
 
     @property
     def hash(self) -> str:
@@ -64,33 +73,42 @@ def _parse_frontmatter(text: str, source: str) -> Personality:
         description=meta.get("description", ""),
         body=body.strip(),
         agents=agents,
+        disabled=meta.get("disabled", "").lower() == "true",
     )
+
+
+def _builtin_dir():
+    return resources.files("tellmphone") / "data" / "personalities"
 
 
 class PersonalityBook:
     def __init__(self, directory: Path):
-        self.directory = directory
-
-    def ensure_starters(self) -> None:
-        """Copy the bundled starter personas on first run only."""
-        if self.directory.exists():
-            return
-        self.directory.mkdir(parents=True)
-        starters = resources.files("tellmphone") / "data" / "personalities"
-        for entry in starters.iterdir():
-            if entry.name.endswith(".md"):
-                (self.directory / entry.name).write_text(entry.read_text())
+        self.directory = directory  # the user layer
 
     def all(self) -> list[Personality]:
-        if not self.directory.exists():
-            return []
-        found = []
-        for path in sorted(self.directory.glob("*.md")):
+        by_name: dict[str, Personality] = {}
+        for entry in sorted(_builtin_dir().iterdir(), key=lambda e: e.name):
+            if not entry.name.endswith(".md"):
+                continue
             try:
-                found.append(_parse_frontmatter(path.read_text(), str(path)))
+                persona = _parse_frontmatter(entry.read_text(), entry.name)
             except PersonalityError:
-                continue  # a malformed file shouldn't break the phonebook
-        return found
+                continue
+            persona.source = "builtin"
+            by_name[persona.name] = persona
+
+        if self.directory.exists():
+            for path in sorted(self.directory.glob("*.md")):
+                try:
+                    persona = _parse_frontmatter(path.read_text(), str(path))
+                except PersonalityError:
+                    continue  # a malformed file shouldn't break the phonebook
+                by_name[persona.name] = persona
+
+        return sorted(
+            (p for p in by_name.values() if not p.disabled),
+            key=lambda p: p.name,
+        )
 
     def get(self, name: str) -> Personality:
         for personality in self.all():

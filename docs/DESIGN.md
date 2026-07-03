@@ -261,7 +261,12 @@ Invariants:
 
 ## 7. Personalities
 
-A personality is a Markdown file in `~/.tellmphone/personalities/`:
+A personality is a Markdown file. Builtins ship inside the package
+(`tellmphone/data/personalities/`) and are read from there at runtime —
+never copied to disk — so package upgrades reach every install. User
+personalities live in `~/.tellmphone/personalities/` and overlay the
+builtins: a user file whose `name` matches a builtin replaces it, and one
+with `disabled: true` in the frontmatter hides the name entirely.
 
 ```markdown
 ---
@@ -286,10 +291,11 @@ Rules:
 - **First message only.** Personalities are injected once at spawn; resumes
   rely on the callee's own session memory. (Transcript-replay fallback
   re-injects from the snapshot stored in the transcript's first entry.)
-- Personalities are user-managed files (create/edit with any editor). A
-  `tellmphone personalities` CLI listing + a few starter personas ship in the
-  box. No MCP tool for *writing* personalities in v0 — that's a human curation
-  job, and letting agents author each other's system prompts is a footgun.
+- Personalities are user-managed files (create/edit with any editor). The
+  `tellmphone personalities` CLI listing shows each entry's layer
+  (`[builtin]`/`[user]`). No MCP tool for *writing* personalities in v0 —
+  that's a human curation job, and letting agents author each other's system
+  prompts is a footgun.
 
 ## 8. Adapter interface
 

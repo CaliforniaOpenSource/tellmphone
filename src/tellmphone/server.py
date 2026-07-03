@@ -17,7 +17,6 @@ from tellmphone.switchboard import Switchboard
 def create_server(config: Config) -> FastMCP:
     store = Store(config.home)
     switchboard = Switchboard(config, store, load_adapters())
-    switchboard.personalities.ensure_starters()
 
     mcp = FastMCP(
         "tellmphone",

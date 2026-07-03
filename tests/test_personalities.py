@@ -40,15 +40,33 @@ def test_unknown_lists_available(book):
 
 def test_malformed_file_is_skipped(book):
     (book.directory / "broken.md").write_text("no frontmatter here")
-    assert [p.name for p in book.all()] == ["grumpy"]
+    assert "grumpy" in [p.name for p in book.all()]
 
 
-def test_ensure_starters(tmp_path):
-    book = PersonalityBook(tmp_path / "fresh")
-    book.ensure_starters()
+def test_builtins_available_without_user_dir(tmp_path):
+    book = PersonalityBook(tmp_path / "never-created")
     names = {p.name for p in book.all()}
     assert {"grumpy-reviewer", "security-auditor", "rubber-duck"} <= names
-    # second call must not clobber user edits
-    (book.directory / "grumpy-reviewer.md").write_text(GRUMPY)
-    book.ensure_starters()
-    assert book.get("grumpy").name == "grumpy"
+    assert all(p.source == "builtin" for p in book.all())
+
+
+def test_user_file_is_tagged_user(book):
+    assert book.get("grumpy").source == "user"
+
+
+def test_user_file_overrides_builtin(book):
+    (book.directory / "grumpy-reviewer.md").write_text(
+        "---\nname: grumpy-reviewer\ndescription: Mine.\n---\nMy own grump.\n"
+    )
+    p = book.get("grumpy-reviewer")
+    assert p.source == "user"
+    assert p.body == "My own grump."
+
+
+def test_disabled_user_file_hides_builtin(book):
+    (book.directory / "rubber-duck.md").write_text(
+        "---\nname: rubber-duck\ndisabled: true\n---\n"
+    )
+    assert "rubber-duck" not in [p.name for p in book.all()]
+    with pytest.raises(PersonalityError, match="rubber-duck"):
+        book.get("rubber-duck")
