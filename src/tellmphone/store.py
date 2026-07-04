@@ -18,6 +18,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,6 +27,7 @@ from typing import Iterator, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 CALL_ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"  # no i/l/o/u lookalikes
+CALL_ID_LENGTH = 8
 
 CallStatus = Literal["ringing", "answered", "voicemail", "closed", "failed"]
 
@@ -35,6 +37,7 @@ class Party(BaseModel):
     session_id: str | None = None
     personality: str | None = None
     personality_hash: str | None = None
+    personality_body: str | None = None
     model: str | None = None  # pinned at call time; every turn of the call uses it
 
 
@@ -45,6 +48,8 @@ class CallRecord(BaseModel):
     callee: Party
     status: CallStatus
     hop_count: int = 1
+    # Caller-granted write access, pinned for the whole call (docs/DESIGN.md §6).
+    write: bool = False
     created_at: datetime
     last_activity_at: datetime
     unread_for: list[str] = Field(default_factory=list)
@@ -77,7 +82,9 @@ def utcnow() -> datetime:
 
 
 def new_call_id() -> str:
-    return "call-" + "".join(secrets.choice(CALL_ID_ALPHABET) for _ in range(4))
+    return "call-" + "".join(
+        secrets.choice(CALL_ID_ALPHABET) for _ in range(CALL_ID_LENGTH)
+    )
 
 
 def project_key(project_dir: str | Path) -> str:
@@ -157,6 +164,18 @@ class Store:
         for meta in sorted(box.glob("calls/*/call.json")):
             records.append(CallRecord.model_validate_json(meta.read_text()))
         return records
+
+    def all_calls(self) -> list[CallRecord]:
+        """Return every call record in the store."""
+        if not self.projects_dir.exists():
+            return []
+        records = []
+        for meta in sorted(self.projects_dir.glob("*/calls/*/call.json")):
+            records.append(CallRecord.model_validate_json(meta.read_text()))
+        return records
+
+    def delete_call(self, call_id: str) -> None:
+        shutil.rmtree(self.call_dir(call_id))
 
     # -- transcripts ---------------------------------------------------------
 

@@ -109,4 +109,4 @@ def test_lock_busy(store, project):
 
 def test_new_call_id_shape():
     cid = new_call_id()
-    assert cid.startswith("call-") and len(cid) == 9
+    assert cid.startswith("call-") and len(cid) == 13

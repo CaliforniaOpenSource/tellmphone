@@ -45,7 +45,7 @@ class ClaudeAdapter(AgentAdapter):
 
     def spawn(self, req: SpawnRequest) -> AgentTurn:
         cmd = ["claude", "-p", req.message, "--output-format", "json"]
-        if req.personality:
+        if req.personality and req.personality.body:
             cmd += ["--append-system-prompt", req.personality.body]
         return self._run(cmd + self._common_flags(req), req)
 

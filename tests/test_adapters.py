@@ -82,6 +82,12 @@ class TestClaudeAdapter:
         turn = ClaudeAdapter().spawn(req)
         assert "system=Be grumpy." in turn.text
 
+    def test_empty_body_personality_injects_nothing(self, fake_bin, req):
+        fake_bin("claude", FAKE_CLAUDE)
+        req.personality = Personality(name="neutral", description="", body="")
+        turn = ClaudeAdapter().spawn(req)
+        assert "system=|" in turn.text  # no --append-system-prompt sent
+
     def test_model_flag(self, fake_bin, req):
         fake_bin("claude", FAKE_CLAUDE)
         req.model = "opus"
@@ -122,6 +128,12 @@ class TestCodexAdapter:
         req.personality = Personality(name="g", description="", body="Be grumpy.")
         turn = CodexAdapter().spawn(req)
         assert "Be grumpy." in turn.text  # preamble is part of the prompt
+
+    def test_empty_body_personality_injects_nothing(self, fake_bin, req):
+        fake_bin("codex", FAKE_CODEX)
+        req.personality = Personality(name="neutral", description="", body="")
+        turn = CodexAdapter().spawn(req)
+        assert turn.text.startswith("codex answer to: hello there")  # no preamble
 
     def test_resume_and_session_lost(self, fake_bin, req):
         fake_bin("codex", FAKE_CODEX)

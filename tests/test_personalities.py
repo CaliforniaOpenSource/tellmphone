@@ -50,6 +50,11 @@ def test_builtins_available_without_user_dir(tmp_path):
     assert all(p.source == "builtin" for p in book.all())
 
 
+def test_neutral_builtin_has_empty_body(tmp_path):
+    book = PersonalityBook(tmp_path / "never-created")
+    assert book.get("neutral").body == ""
+
+
 def test_user_file_is_tagged_user(book):
     assert book.get("grumpy").source == "user"
 

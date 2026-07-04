@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import threading
 from dataclasses import dataclass
+from pathlib import Path
 
 from tellmphone.adapters.base import (
     AdapterError,
@@ -20,7 +21,7 @@ from tellmphone.adapters.base import (
     SpawnRequest,
 )
 from tellmphone.config import Config
-from tellmphone.personalities import PersonalityBook, PersonalityError
+from tellmphone.personalities import Personality, PersonalityBook, PersonalityError
 from tellmphone.store import (
     CallBusy,
     CallNotFound,
@@ -72,7 +73,21 @@ class Switchboard:
         context: str | None = None,
         mode: str = "wait",
         timeout_s: int | None = None,
+        write: bool = False,
     ) -> dict:
+        if mode not in ("wait", "voicemail"):
+            return {
+                "status": "refused",
+                "reason": "mode must be 'wait' or 'voicemail'",
+            }
+        project_path = Path(project_dir).expanduser().resolve()
+        if not project_path.exists() or not project_path.is_dir():
+            return {
+                "status": "refused",
+                "reason": f"project_dir must be an existing directory: {project_dir}",
+            }
+        project_dir = str(project_path)
+
         hop_count = self.config.hop_count + 1
         if hop_count > self.config.max_hops:
             return {
@@ -83,17 +98,23 @@ class Switchboard:
                     "Answer with what you have."
                 ),
             }
+        # Only a top-level caller may grant write; a callee inherits
+        # permissions, it doesn't extend them.
+        if write and self.config.hop_count > 0:
+            return {
+                "status": "refused",
+                "reason": (
+                    "write access can only be granted by a top-level caller; as "
+                    "an agent-to-agent callee you cannot extend permissions down "
+                    "the chain. Call again without write=True."
+                ),
+            }
 
         adapter = self.adapters.get(callee)
         if adapter is None:
             return {
                 "status": "refused",
                 "reason": f"unknown agent {callee!r}; known: {sorted(self.adapters)}",
-            }
-        if callee == self.config.i_am:
-            return {
-                "status": "refused",
-                "reason": f"you are {callee!r}; calling yourself is just thinking",
             }
 
         persona = None
@@ -116,12 +137,14 @@ class Switchboard:
                 agent=callee,
                 personality=persona.name if persona else None,
                 personality_hash=persona.hash if persona else None,
+                personality_body=persona.body if persona else None,
                 # Pinned for the whole call so resumes and replays don't
                 # silently switch brains mid-conversation.
                 model=model or self.config.default_model_for(callee),
             ),
             status="voicemail" if mode == "voicemail" else "ringing",
             hop_count=hop_count,
+            write=write,
             created_at=utcnow(),
             last_activity_at=utcnow(),
         )
@@ -181,15 +204,15 @@ class Switchboard:
             }
 
         me = self.config.i_am
-        if me == record.callee.agent:
-            return self._reply_as_callee(record, message)
-        if me != record.caller.agent:
+        if me != record.caller.agent and me != record.callee.agent:
             return {
                 "call_id": call_id,
                 "status": "error",
                 "error": f"call {call_id} is between {record.caller.agent} and "
                 f"{record.callee.agent}; you are {me}",
             }
+        if me != record.caller.agent:
+            return self._reply_as_callee(record, message)
 
         # I'm the caller: drive the callee headlessly.
         adapter = self.adapters.get(record.callee.agent)
@@ -263,6 +286,7 @@ class Switchboard:
                         "from": other,
                         "personality": record.callee.personality,
                         "preview": _preview(last.body) if last else "",
+                        "body": last.body if last else "",
                         "ts": last.ts.isoformat() if last else record.last_activity_at.isoformat(),
                     }
                 )
@@ -338,17 +362,25 @@ class Switchboard:
             project_dir=record.project_dir,
             personality=persona,
             model=record.callee.model,
-            write_access=self.config.permissions_for(record.project_dir).write,
+            write_access=record.write
+            or self.config.permissions_for(record.project_dir).write,
             hop_count=record.hop_count,
         )
 
     def _persona_of(self, record: CallRecord):
         if not record.callee.personality:
             return None
+        if record.callee.personality_body is not None:
+            return Personality(
+                name=record.callee.personality,
+                description="",
+                body=record.callee.personality_body,
+                source="snapshot",
+            )
         try:
             return self.personalities.get(record.callee.personality)
         except PersonalityError:
-            return None  # personality deleted since call started; session has it anyway
+            return None  # old call record without a body snapshot
 
     def _append(self, record, from_, to, body, kind="message") -> None:
         # seq is assigned inside append_transcript, atomically under the

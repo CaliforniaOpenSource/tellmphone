@@ -113,7 +113,7 @@ class CodexAdapter(AgentAdapter):
 
     def spawn(self, req: SpawnRequest) -> AgentTurn:
         prompt = req.message
-        if req.personality:
+        if req.personality and req.personality.body:
             prompt = framed_personality_preamble(req.personality) + prompt
         return self._run(["codex", "exec"], prompt, req)
 

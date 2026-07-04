@@ -6,8 +6,10 @@ details are resolved there.
 
 ## 1. Goals
 
-1. Let a coding agent (the **caller**) send a message to another coding agent
-   (the **callee**) for a given project directory, and get a response.
+1. Let a coding agent (the **caller**) send a message to a coding agent
+   (the **callee**) for a given project directory, and get a response. Caller
+   and callee may be the same agent kind when the user wants a separate
+   headless session with a different personality or model.
 2. Keep a call **conversational**: follow-up messages go to the same callee
    session, with full context, even if either side's session was interrupted,
    compacted, or restarted in between.
@@ -114,21 +116,22 @@ Decisions baked in here:
 - **JSON files, not a database.** Human-inspectable, trivially debuggable,
   no migration story needed pre-1.0. One lock file per call serializes the
   only real race (two processes appending to one call).
-- `call_id` is a short human-friendly id (e.g. `call-7f3k`), because the
+- `call_id` is a short human-friendly id (e.g. `call-7f3k9q2m`), because the
   calling LLM will read and re-type it.
 
 ### 4.1 `call.json`
 
 ```json
 {
-  "call_id": "call-7f3k",
+  "call_id": "call-7f3k9q2m",
   "project_dir": "/Users/kdewald/ws/foo",
   "caller": {"agent": "claude"},
   "callee": {
     "agent": "codex",
     "session_id": "0197c-...",        // native id, owned by the adapter
     "personality": "grumpy-reviewer",
-    "personality_hash": "sha256:ab12…" // snapshot so edits don't mutate live calls
+    "personality_hash": "sha256:ab12…",
+    "personality_body": "You are a grumpy…" // snapshot so edits don't mutate live calls
   },
   "status": "answered",               // ringing | answered | voicemail | closed | failed
   "hop_count": 1,
@@ -166,11 +169,11 @@ call(
 ```
 
 - `mode="wait"`: spawn the callee, block, return its answer inline. If
-  `timeout_s` elapses, the subprocess **keeps running detached**; the tool
-  returns `status="ringing"` with the call id and a note to check back —
-  the answer lands in the mailbox when the callee finishes. This matters
-  because MCP clients have their own tool timeouts and codex runs can take
-  minutes; the caller must never lose a slow answer.
+  `timeout_s` elapses, the tool returns `status="ringing"` with the call id
+  and a note to check back; the worker keeps running in the current server
+  process and, if that process survives, the answer lands in the mailbox when
+  the callee finishes. This best-effort fallback keeps ordinary slow answers
+  from being lost, but it is not a durable job runner.
 - `mode="voicemail"`: enqueue only. The callee is *not* spawned; the message
   waits until some session of the callee agent in that project runs
   `check_messages` and chooses to answer. (Human-in-the-loop async.)
@@ -204,7 +207,7 @@ native sessions aren't.
 
 ```
 check_messages(project_dir: str) → {
-  unread: [{call_id, from, personality?, last_message_preview, ts}],
+  unread: [{call_id, from, personality?, preview, body, ts}],
   open_calls: [{call_id, with, status, last_activity_at}],
 }
 ```
@@ -230,18 +233,18 @@ discover what it can dial without any out-of-band knowledge.
 ```
 caller (claude)                switchboard                    callee (codex)
    │  call(codex, msg, dir)         │                              │
-   ├───────────────────────────────►│ create call-7f3k, lock       │
+   ├───────────────────────────────►│ create call-7f3k9q2m, lock   │
    │                                ├── spawn: codex exec ────────►│
    │                                │   … capture session_id …     │ runs in dir
    │                                │◄── final message + id ───────┤
-   │◄── {call-7f3k, response} ──────┤ store session_id, transcript │
+   │◄── {call-7f3k9q2m, response} ──┤ store session_id, transcript │
    │                                │                              │
    │  (caller session dies, user restarts Claude tomorrow)         │
    │                                │                              │
    │  check_messages(dir)           │                              │
    ├───────────────────────────────►│ scan project box             │
-   │◄── open_calls: [call-7f3k] ────┤                              │
-   │  reply(call-7f3k, "but…")      │                              │
+   │◄── open_calls: [call-7f3k9q2m] ┤                              │
+   │  reply(call-7f3k9q2m, "but…")  │                              │
    ├───────────────────────────────►├── codex exec resume <id> ───►│ same context
 ```
 
@@ -285,12 +288,12 @@ Rules:
   has no clean system-prompt flag in exec mode `[verify]`, so its adapter
   prepends a clearly framed preamble to the first message.
 - **Snapshot at call time.** `call.json` records the personality's content
-  hash. Editing a personality file never changes the behavior of an in-flight
-  call — a resumed session already has the old prompt in its context, and the
-  hash makes that explicit rather than accidental.
+  hash and body. Editing a personality file never changes the behavior of an
+  in-flight call — a resumed session already has the old prompt in its
+  context, and transcript replay re-injects the stored body.
 - **First message only.** Personalities are injected once at spawn; resumes
   rely on the callee's own session memory. (Transcript-replay fallback
-  re-injects from the snapshot stored in the transcript's first entry.)
+  re-injects from the snapshot stored in `call.json`.)
 - Personalities are user-managed files (create/edit with any editor). The
   `tellmphone personalities` CLI listing shows each entry's layer
   (`[builtin]`/`[user]`). No MCP tool for *writing* personalities in v0 —
@@ -355,12 +358,20 @@ but they make agents *use* the phone well.
 
 ## 10. Security & safety model
 
-- **Callee permissions are config, not caller choice.** Default: callees run
-  in the most restricted headless mode available (Claude: default `-p`
-  permission mode, no `--dangerously-skip-permissions`; Codex: default
-  read-only sandbox `[verify]`). Granting a callee write/exec access is a
-  per-project entry in `config.toml` that only the human edits. A caller
-  asking for more than configured gets a refusal in the tool result.
+- **Callee permissions never extend down a chain.** Calls default to the most
+  restricted headless mode available because the common case is review,
+  design, or debugging advice, not edits (Claude: default `-p` permission
+  mode, no `--dangerously-skip-permissions`; Codex: default read-only sandbox
+  `[verify]`). A direct caller can deliberately pass write access to the
+  callee in exactly two ways: a standing per-project entry in `config.toml`
+  that only the human edits, or a per-call `write=True` from a **top-level**
+  caller. This lets a trusted top-level agent delegate edits without making
+  every short-lived project a config chore. The switchboard refuses
+  `write=True` from any session with `hop_count > 0`: a callee receives the
+  caller's grant for that call, but it cannot extend that grant to another
+  agent down the chain. The grant is pinned on the call record for the life of
+  the call (replies and replay-spawns keep it; it can't be widened after the
+  fact).
 - **Hop limit.** Every spawned callee gets the TeLLMphone server too, so
   Codex could call Claude could call Codex… `hop_count` travels in an env var
   (`TELLMPHONE_HOP=1`) set on spawned subprocesses; at the configured max
@@ -391,7 +402,7 @@ tellmphone/
 │   │   ├── base.py           # AgentAdapter ABC + entry-point loading
 │   │   ├── claude.py
 │   │   └── codex.py
-│   └── cli.py                # tellmphone serve | personalities | gc | install-etiquette
+│   └── cli.py                # serve | call | reply | messages | show | gc | personalities
 └── tests/                    # adapters tested against fake CLI scripts
 ```
 
@@ -405,8 +416,7 @@ for users who have uv).
 - **v0.2 — answering machine.** `check_messages`, voicemail mode, ringing→
   mailbox timeout flow, unread tracking, etiquette skill + AGENTS.md.
 - **v0.3 — switchboard upgrades.** Entry-point adapter plugins documented for
-  third parties, `tellmphone gc`, token/cost reporting, transcript replay
-  hardening.
+  third parties, token/cost reporting, transcript replay hardening.
 - **Later / maybe.** Conference calls (fan-out one ask to N callees, collect
   answers); hooks-based new-message nudges so agents notice voicemail without
   polling; SQLite backend if JSON+locks ever hurts; remote calls (explicitly
@@ -469,7 +479,6 @@ Learned while building; the sections above remain the intent.
 3. **Voicemail discovery**: is pull-only good enough in practice, or do users
    forget mailboxes exist? (A `SessionStart` hook that runs `check_messages`
    might graduate from v-later fast.)
-4. **Live call ownership**: when a wait-mode call outlives the MCP tool call
-   (detached subprocess), who reaps zombies / persists partial output if the
-   *caller's* process dies too? Needs a small "in-flight" state + reconcile
-   pass on server start.
+4. **Live call ownership**: when a wait-mode call outlives the MCP tool call,
+   how do we persist partial output if the *caller's* process dies too? Needs
+   a small "in-flight" state + reconcile pass on server start.

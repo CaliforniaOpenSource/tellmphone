@@ -39,8 +39,9 @@ def create_server(config: Config) -> FastMCP:
         context: str | None = None,
         mode: str = "wait",
         timeout_s: int | None = None,
+        write: bool = False,
     ) -> dict:
-        """Place a call to another coding agent about a project.
+        """Place a call to a coding agent about a project.
 
         The callee runs headlessly in `project_dir` (absolute path — usually
         your current working directory) and can read the code there, so don't
@@ -55,10 +56,16 @@ def create_server(config: Config) -> FastMCP:
 
         mode='wait' (default) blocks until the callee answers and returns the
         response inline; if it takes too long you get status='ringing' and the
-        answer lands in the project mailbox (poll check_messages). Live calls
+        answer lands in the project mailbox if this server process survives
+        long enough for the callee to finish (poll check_messages). Live calls
         take minutes and burn real tokens — one thoughtful call beats three
         lazy ones. mode='voicemail' just leaves the message for the next time
         that agent is active in the project; nothing runs now.
+
+        write=True lets the callee edit files in `project_dir` for the whole
+        call — use it when you're deliberately delegating changes, not just
+        asking for opinions. Callees themselves cannot grant write; such
+        calls are refused.
 
         Keep the returned call_id to continue the conversation with reply().
         """
@@ -71,6 +78,7 @@ def create_server(config: Config) -> FastMCP:
             context=context,
             mode=mode,
             timeout_s=timeout_s,
+            write=write,
         )
 
     @mcp.tool()
@@ -88,10 +96,11 @@ def create_server(config: Config) -> FastMCP:
     def check_messages(project_dir: str) -> dict:
         """Check for messages from other agents in a project ("anything for me?").
 
-        Returns unread messages (voicemails and replies addressed to you) and
-        all open calls you're a party to. Worth doing when you start working
-        in a project. Fetching marks messages as read, so relay anything
-        important to your human before moving on. Reply with reply(call_id).
+        Returns unread messages (voicemails and replies addressed to you),
+        including their full body, and all open calls you're a party to.
+        Worth doing when you start working in a project. Fetching marks
+        messages as read, so relay anything important to your human before
+        moving on. Reply with reply(call_id).
         """
         return switchboard.check_messages(project_dir=project_dir)
 

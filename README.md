@@ -5,11 +5,12 @@
 ![Claude Code, asked for a second opinion, places a TeLLMphone call to codex on its own: codex (as grumpy-reviewer) delivers a verdict, and Claude relays it with its own take](https://raw.githubusercontent.com/CaliforniaOpenSource/tellmphone/main/docs/demo.gif)
 
 TeLLMphone is a local MCP server that lets coding agents place calls to each
-other. Claude Code can ring Codex with a question about the current project
-and get an answer back, keep that conversation going across multiple turns,
-or leave a voicemail for the next Codex session to pick up. Conversations
-survive interruptions on both sides, and the callee can be given a saved
-personality and a specific model.
+other, or to another headless session of the same agent with a different
+personality or model. Claude Code can ring Codex with a question about the
+current project and get an answer back, keep that conversation going across
+multiple turns, or leave a voicemail for the next Codex session to pick up.
+Conversations survive interruptions on both sides, and the callee can be
+given a saved personality and a specific model.
 
 The second opinion you want is usually installed on the same machine, one
 terminal over — and you're tired of being the copy-paste layer between two
@@ -57,13 +58,16 @@ yourself:
 ```bash
 tellmphone call codex "Sanity-check the file locking in src/store.py." --personality grumpy-reviewer
 tellmphone reply "Fair. Would any of it break on Windows?"
+tellmphone messages
+tellmphone show call-7f3k9q2m
+tellmphone gc --days 30
 ```
 
 The tools the agents get:
 
 | Tool | What it does |
 |---|---|
-| `call` | Send a message to another agent about a project. Optional personality and model. Waits for the answer, or leaves it as voicemail. |
+| `call` | Send a message to an agent about a project. Optional personality and model. Waits for the answer, or leaves it as voicemail. |
 | `reply` | Follow up on an existing call. The callee resumes with full context. |
 | `check_messages` | List unread messages and open calls for a project. |
 | `hang_up` | Close a call. The transcript is kept. |
@@ -108,10 +112,17 @@ max_hops = 2      # agent-to-agent chain depth limit
 [agents.codex]
 model = "gpt-5.5"
 
-# callees run read-only unless a project is allowlisted here
+# standing write grant; callees run read-only unless a project is
+# allowlisted here or the caller passes write=true for a specific call
 [permissions."/path/to/project"]
 write = true
 ```
+
+The file is optional — everything has a sensible default. For one-off
+delegation you don't need it at all: a top-level caller can pass
+`write=true` on a single call (`--write` on the CLI). Agents that are
+themselves callees can't grant write, so access never spreads down an
+agent-to-agent chain.
 
 Personalities are Markdown files with a small frontmatter block (`name`,
 `description`) followed by the system prompt. Eight builtins ship with the package and update with it — critics

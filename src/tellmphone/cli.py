@@ -58,7 +58,8 @@ def _print_turn(result: dict, started: float) -> int:
     detail = (
         result.get("error") or result.get("reason") or result.get("note") or ""
     )
-    print(f"{result['status']}: {detail}")
+    call_id = f"{result['call_id']}: " if result.get("call_id") else ""
+    print(f"{result['status']}: {call_id}{detail}")
     return 0 if result["status"] in ("voicemail", "ringing") else 1
 
 
@@ -77,6 +78,8 @@ def _cmd_call(args) -> int:
         str(Path(args.project).resolve()),
         personality=args.personality,
         model=args.model,
+        mode=args.mode,
+        write=args.write,
     )
     return _print_turn(result, started)
 
@@ -102,6 +105,101 @@ def _cmd_reply(args) -> int:
     print(f"☎ {call_id}…", flush=True)
     started = time.monotonic()
     return _print_turn(board.reply(call_id, args.message), started)
+
+
+def _cmd_messages(args) -> int:
+    board = _make_switchboard(args.as_name)
+    project = str(Path(args.project).resolve())
+    mailbox = board.check_messages(project)
+
+    unread = mailbox["unread"]
+    if unread:
+        print(f"unread for {args.as_name} in {project}:")
+        for msg in unread:
+            print(f"\n{msg['call_id']} from {msg['from']} at {msg['ts']}")
+            if msg.get("personality"):
+                print(f"personality: {msg['personality']}")
+            print(msg.get("body") or msg.get("preview", ""))
+    else:
+        print(f"no unread messages for {args.as_name} in {project}")
+
+    open_calls = mailbox["open_calls"]
+    if open_calls:
+        print("\nopen calls:")
+        for call in open_calls:
+            print(
+                f"{call['call_id']}  {call['status']:9}  "
+                f"with {call['with']}  {call['last_activity_at']}"
+            )
+    return 0
+
+
+def _cmd_show(args) -> int:
+    from tellmphone.store import CallNotFound
+
+    board = _make_switchboard(args.as_name)
+    try:
+        record = board.store.load_call(args.call_id)
+    except CallNotFound:
+        print(f"no call {args.call_id!r}")
+        return 1
+
+    print(f"{record.call_id}  {record.status}")
+    print(f"project: {record.project_dir}")
+    print(f"caller:  {record.caller.agent}")
+    print(f"callee:  {record.callee.agent}")
+    if record.callee.personality:
+        print(f"personality: {record.callee.personality}")
+    if record.callee.model:
+        print(f"model: {record.callee.model}")
+    print(f"write: {record.write}")
+    print(f"created: {record.created_at.isoformat()}")
+    print(f"last:    {record.last_activity_at.isoformat()}")
+
+    transcript = board.store.read_transcript(record.call_id)
+    if not transcript:
+        print("\n(no transcript)")
+        return 0
+
+    print("\ntranscript:")
+    for entry in transcript:
+        print(f"\n[{entry.seq}] {entry.ts.isoformat()}  {entry.from_} -> {entry.to}")
+        if entry.kind != "message":
+            print(f"kind: {entry.kind}")
+        print(entry.body)
+    return 0
+
+
+def _cmd_gc(args) -> int:
+    from datetime import timedelta
+
+    from tellmphone.store import utcnow
+
+    board = _make_switchboard(args.as_name)
+    if args.project:
+        records = board.store.calls_for_project(str(Path(args.project).resolve()))
+    else:
+        records = board.store.all_calls()
+
+    cutoff = utcnow() - timedelta(days=args.days)
+    doomed = [
+        record
+        for record in records
+        if record.status in ("closed", "failed") and record.last_activity_at <= cutoff
+    ]
+
+    for record in doomed:
+        action = "would delete" if args.dry_run else "deleted"
+        print(
+            f"{action} {record.call_id}  {record.status}  "
+            f"{record.last_activity_at.isoformat()}  {record.project_dir}"
+        )
+        if not args.dry_run:
+            board.store.delete_call(record.call_id)
+
+    suffix = " (dry run)" if args.dry_run else ""
+    print(f"{len(doomed)} call(s) eligible for gc{suffix}")
+    return 0
 
 
 def _run_install(agents: list[str] | None, serve_command: str | None,
@@ -170,8 +268,17 @@ def main(argv: list[str] | None = None) -> int:
     call.add_argument("--personality", help="a name from ~/.tellmphone/personalities")
     call.add_argument("--model", help="model the callee should run")
     call.add_argument("--project", default=".", help="project directory (default: cwd)")
+    call.add_argument(
+        "--mode",
+        choices=["wait", "voicemail"],
+        default="wait",
+        help="wait for an answer or leave voicemail",
+    )
     call.add_argument("--as", dest="as_name", default="human", help=argparse.SUPPRESS)
     call.add_argument("--timeout", type=int, help="seconds before rolling to voicemail")
+    call.add_argument(
+        "--write", action="store_true", help="let the callee edit files in the project"
+    )
 
     reply = sub.add_parser("reply", help="follow up on your most recent (or a given) call")
     reply.add_argument("call_id", nargs="?", help="defaults to your latest open call here")
@@ -179,6 +286,22 @@ def main(argv: list[str] | None = None) -> int:
     reply.add_argument("--project", default=".", help="project directory (default: cwd)")
     reply.add_argument("--as", dest="as_name", default="human", help=argparse.SUPPRESS)
     reply.add_argument("--timeout", type=int, help="seconds before rolling to voicemail")
+
+    messages = sub.add_parser("messages", help="show unread messages and open calls")
+    messages.add_argument("--project", default=".", help="project directory (default: cwd)")
+    messages.add_argument("--as", dest="as_name", default="human", help=argparse.SUPPRESS)
+
+    show = sub.add_parser("show", help="show call metadata and transcript")
+    show.add_argument("call_id")
+    show.add_argument("--as", dest="as_name", default="human", help=argparse.SUPPRESS)
+
+    gc = sub.add_parser("gc", help="delete closed/failed calls older than N days")
+    gc.add_argument(
+        "--days", type=int, default=30, help="age threshold in days (default: 30)"
+    )
+    gc.add_argument("--project", help="limit cleanup to one project")
+    gc.add_argument("--dry-run", action="store_true", help="print what would be deleted")
+    gc.add_argument("--as", dest="as_name", default="human", help=argparse.SUPPRESS)
 
     sub.add_parser("personalities", help="list installed personalities")
     sub.add_parser("version", help="print version")
@@ -193,6 +316,12 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_call(args)
     if args.command == "reply":
         return _cmd_reply(args)
+    if args.command == "messages":
+        return _cmd_messages(args)
+    if args.command == "show":
+        return _cmd_show(args)
+    if args.command == "gc":
+        return _cmd_gc(args)
 
     if args.command == "version":
         print(f"tellmphone {__version__}")

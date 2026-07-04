@@ -46,7 +46,25 @@ def test_personality_reaches_adapter(boards, fake_adapter, project, store):
     result = caller.place_call("fake", "hi", project, personality="grumpy")
     assert result["personality"] == "grumpy"
     assert fake_adapter.spawns[0].personality.name == "grumpy"
-    assert store.load_call(result["call_id"]).callee.personality_hash.startswith("sha256:")
+    callee = store.load_call(result["call_id"]).callee
+    assert callee.personality_hash.startswith("sha256:")
+    assert callee.personality_body == "Be grumpy."
+
+
+def test_personality_replay_uses_call_snapshot(boards, fake_adapter, project, store):
+    caller, _ = boards
+    install_personality(store)
+    left = caller.place_call(
+        "fake", "original ask", project, personality="grumpy", mode="voicemail"
+    )
+    install_personality(
+        store,
+        "---\nname: grumpy\ndescription: Changed.\n---\nBe cheerful.\n",
+    )
+
+    caller.reply(left["call_id"], "actually, live please")
+
+    assert fake_adapter.spawns[0].personality.body == "Be grumpy."
 
 
 def test_model_is_pinned_for_the_whole_call(boards, fake_adapter, project, store):
@@ -138,6 +156,64 @@ def test_timeout_goes_to_voicemail(boards, fake_adapter, project, store):
     assert "spawn-reply" in mailbox["unread"][0]["preview"]
 
 
+def test_check_messages_returns_full_unread_body(boards, project):
+    caller, callee = boards
+    message = "please read all of this: " + ("x" * 300)
+    left = caller.place_call("fake", message, project, mode="voicemail")
+
+    unread = callee.check_messages(project)["unread"][0]
+
+    assert unread["call_id"] == left["call_id"]
+    assert unread["body"] == message
+    assert len(unread["preview"]) < len(message)
+
+
+# ------------------------------------------------------------- write access
+
+
+def test_caller_grants_write_for_the_whole_call(boards, fake_adapter, project, store):
+    caller, _ = boards
+    result = caller.place_call("fake", "fix the bug", project, write=True)
+    assert fake_adapter.spawns[0].write_access
+    assert store.load_call(result["call_id"]).write
+    # a reply that falls back to replay-spawn still carries the grant
+    fake_adapter.lose_session = True
+    caller.reply(result["call_id"], "and the tests")
+    assert fake_adapter.spawns[1].write_access
+
+
+def test_write_defaults_off(boards, fake_adapter, project):
+    caller, _ = boards
+    caller.place_call("fake", "just look", project)
+    assert not fake_adapter.spawns[0].write_access
+
+
+def test_callee_cannot_grant_write(boards, store, project, fake_adapter):
+    _, _ = boards
+    deep = Switchboard(
+        Config(i_am="claude", home=store.home, max_hops=2),
+        store,
+        {"fake": fake_adapter},
+    )
+    deep.config.hop_count = 1  # this session is itself a callee
+    result = deep.place_call("fake", "go change files", project, write=True)
+    assert result["status"] == "refused"
+    assert "top-level caller" in result["reason"]
+    assert fake_adapter.spawns == []
+
+
+def test_config_grant_still_works(store, home, fake_adapter, project):
+    from pathlib import Path
+
+    from tellmphone.config import ProjectPermissions
+
+    cfg = Config(i_am="claude", home=home, timeout_s=30)
+    cfg.permissions[str(Path(project).resolve())] = ProjectPermissions(write=True)
+    board = Switchboard(cfg, store, {"fake": fake_adapter})
+    board.place_call("fake", "hi", project)
+    assert fake_adapter.spawns[0].write_access
+
+
 # ---------------------------------------------------------------- refusals
 
 
@@ -154,10 +230,31 @@ def test_hop_limit(boards, store, project, fake_adapter):
     assert "hop limit" in result["reason"]
 
 
-def test_self_call_refused(boards, project):
+def test_self_call_uses_headless_sibling_session(boards, project):
     caller, _ = boards
+    claude_adapter = caller.adapters["claude"]
+
     result = caller.place_call("claude", "hello me", project)
+    assert result["status"] == "answered"
+    assert claude_adapter.spawns[0].message == "hello me"
+
+    followup = caller.reply(result["call_id"], "keep going")
+    assert followup["status"] == "answered"
+    assert claude_adapter.resumes == [("fake-sess-1", "keep going")]
+
+
+def test_invalid_mode_refused(boards, project):
+    caller, _ = boards
+    result = caller.place_call("fake", "hi", project, mode="later")
     assert result["status"] == "refused"
+    assert "mode" in result["reason"]
+
+
+def test_missing_project_dir_refused(boards, tmp_path):
+    caller, _ = boards
+    result = caller.place_call("fake", "hi", str(tmp_path / "missing"))
+    assert result["status"] == "refused"
+    assert "project_dir" in result["reason"]
 
 
 def test_unknown_agent_refused(boards, project):

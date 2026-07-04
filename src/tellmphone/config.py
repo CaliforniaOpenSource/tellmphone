@@ -34,8 +34,10 @@ class Config:
     home: Path = field(default_factory=tellmphone_home)
     timeout_s: int = DEFAULT_TIMEOUT_S
     max_hops: int = DEFAULT_MAX_HOPS
-    # Keyed by canonical project path. Only humans edit this (config.toml);
-    # callers cannot escalate a callee's permissions through tool arguments.
+    # Keyed by canonical project path; humans edit this (config.toml) for
+    # standing grants. A top-level caller may also grant write per-call via
+    # the `write` tool argument; the switchboard refuses grants from callees
+    # (hop_count > 0), so permissions never extend down a call chain.
     permissions: dict[str, ProjectPermissions] = field(default_factory=dict)
     # Per-agent defaults ([agents.<name>] in config.toml), e.g. a default model.
     agents: dict[str, AgentDefaults] = field(default_factory=dict)
