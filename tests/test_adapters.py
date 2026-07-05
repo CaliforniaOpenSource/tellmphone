@@ -72,6 +72,9 @@ args = sys.argv[1:]
 def flag(name):
     return args[args.index(name) + 1] if name in args else None
 
+def print_prompt():
+    return flag("--print") or ""
+
 session_id = flag("--conversation")
 if session_id == "lost-session":
     sys.stderr.write("conversation does not exist: lost-session\\n")
@@ -80,7 +83,7 @@ if session_id == "lost-session":
 print(json.dumps({
     "argv": args,
     "cwd": os.getcwd(),
-    "prompt": args[-1],
+    "prompt": print_prompt(),
     "model": flag("--model") or "",
     "sandbox": "--sandbox" in args,
     "skip_permissions": "--dangerously-skip-permissions" in args,
@@ -175,7 +178,13 @@ class TestGeminiAdapter:
         fake_bin("agy", FAKE_AGY)
         turn = GeminiAdapter().spawn(req)
         data = json.loads(turn.text)
-        assert data["argv"] == ["--print", "--sandbox", "hello there"]
+        assert data["argv"] == [
+            "--add-dir",
+            project,
+            "--sandbox",
+            "--print",
+            "hello there",
+        ]
         assert data["prompt"] == "hello there"
         assert data["cwd"] == project
         assert turn.session_id is None
@@ -185,9 +194,11 @@ class TestGeminiAdapter:
         req.write_access = True
         data = json.loads(GeminiAdapter().spawn(req).text)
         assert data["argv"] == [
-            "--print",
+            "--add-dir",
+            req.project_dir,
             "--sandbox",
             "--dangerously-skip-permissions",
+            "--print",
             "hello there",
         ]
         assert data["skip_permissions"] is True
@@ -198,10 +209,12 @@ class TestGeminiAdapter:
         req.model = "Gemini 3.1 Pro (High)"
         data = json.loads(GeminiAdapter().spawn(req).text)
         assert data["argv"] == [
-            "--print",
             "--model",
             "Gemini 3.1 Pro (High)",
+            "--add-dir",
+            req.project_dir,
             "--sandbox",
+            "--print",
             "hello there",
         ]
         assert data["model"] == "Gemini 3.1 Pro (High)"
@@ -227,8 +240,10 @@ class TestGeminiAdapter:
         assert data["argv"] == [
             "--conversation",
             "agy-sess-9",
-            "--print",
+            "--add-dir",
+            req.project_dir,
             "--sandbox",
+            "--print",
             "again",
         ]
         assert turn.session_id == "agy-sess-9"

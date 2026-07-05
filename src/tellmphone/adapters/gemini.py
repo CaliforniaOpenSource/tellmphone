@@ -51,10 +51,10 @@ class GeminiAdapter(AgentAdapter):
         prompt = req.message
         if req.personality and req.personality.body:
             prompt = framed_personality_preamble(req.personality) + prompt
-        return self._run(["agy", "--print"], prompt, req)
+        return self._run(["agy"], prompt, req)
 
     def resume(self, session_id: str, message: str, req: SpawnRequest) -> AgentTurn:
-        cmd = ["agy", "--conversation", session_id, "--print"]
+        cmd = ["agy", "--conversation", session_id]
         try:
             turn = self._run(cmd, message, req, resuming=True)
         except AdapterError as exc:
@@ -80,10 +80,11 @@ class GeminiAdapter(AgentAdapter):
         cmd = list(base_cmd)
         if req.model:
             cmd += ["--model", req.model]
+        cmd += ["--add-dir", req.project_dir]
         cmd.append("--sandbox")
         if req.write_access:
             cmd.append("--dangerously-skip-permissions")
-        cmd.append(prompt)
+        cmd += ["--print", prompt]
 
         proc = subprocess.run(
             cmd,
