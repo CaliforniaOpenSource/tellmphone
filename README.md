@@ -125,13 +125,14 @@ themselves callees can't grant write, so access never spreads down an
 agent-to-agent chain.
 
 Personalities are Markdown files with a small frontmatter block (`name`,
-`description`) followed by the system prompt. Eight builtins ship with the package and update with it — critics
-(`grumpy-reviewer`, `security-auditor`, `sycophancy-cop`), thinking partners
-(`rubber-duck`, `devils-advocate`, `architect`), and builders (`debugger`,
-`test-engineer`); your own live in `~/.tellmphone/personalities/`. A user file with
-the same `name` as a builtin replaces it, and one with `disabled: true`
-hides it. Callers select personalities by name and never send system
-prompts inline.
+`description`) followed by the system prompt. Twelve builtins ship with the
+package and update with it — critics (`grumpy-reviewer`, `security-auditor`,
+`sycophancy-cop`), thinking partners (`rubber-duck`, `devils-advocate`,
+`architect`, `the-algorithm`, `transaction-cost-accountant`), and builders
+(`debugger`, `test-engineer`, `evidence-engineer`, `tiny-hacker`); your own live in
+`~/.tellmphone/personalities/`. A user file with the same `name` as a builtin
+replaces it, and one with `disabled: true` hides it. Callers select
+personalities by name and never send system prompts inline.
 
 ## Data
 

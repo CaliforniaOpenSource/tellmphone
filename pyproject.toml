@@ -1,6 +1,6 @@
 [project]
 name = "tellmphone"
-version = "0.1.6"
+version = "0.1.7"
 description = "Let your LLMs call each other — a local MCP switchboard for coding agents"
 readme = "README.md"
 requires-python = ">=3.11"

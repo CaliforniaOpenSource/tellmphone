@@ -46,7 +46,15 @@ def test_malformed_file_is_skipped(book):
 def test_builtins_available_without_user_dir(tmp_path):
     book = PersonalityBook(tmp_path / "never-created")
     names = {p.name for p in book.all()}
-    assert {"grumpy-reviewer", "security-auditor", "rubber-duck"} <= names
+    assert {
+        "evidence-engineer",
+        "grumpy-reviewer",
+        "security-auditor",
+        "rubber-duck",
+        "tiny-hacker",
+        "the-algorithm",
+        "transaction-cost-accountant",
+    } <= names
     assert all(p.source == "builtin" for p in book.all())
 
 
