@@ -1,9 +1,11 @@
 """`tellmphone install` against fake agent CLIs that log their invocations."""
 
+import json
 import shlex
 
 from tellmphone.adapters.claude import ClaudeAdapter
 from tellmphone.adapters.codex import CodexAdapter
+from tellmphone.adapters.gemini import GeminiAdapter
 from tellmphone.cli import main
 
 RECORDING_CLI = '''#!/usr/bin/env python3
@@ -65,6 +67,25 @@ def test_codex_register_sets_tool_approval(fake_bin, tmp_path):
     fixed = config.read_text()
     assert fixed.count("default_tools_approval_mode") == 1
     assert 'default_tools_approval_mode = "approve"' in fixed
+
+
+def test_gemini_register_writes_shared_mcp_config(fake_bin, tmp_path, monkeypatch):
+    monkeypatch.setenv("GEMINI_HOME", str(tmp_path / "gemini-home"))
+    path = tmp_path / "gemini-home" / "config" / "mcp_config.json"
+
+    result = GeminiAdapter().register_mcp(
+        ["uvx", "tellmphone", "serve", "--i-am", "gemini"]
+    )
+
+    assert "registered" in result
+    data = json.loads(path.read_text())
+    assert data["mcpServers"]["tellmphone"] == {
+        "command": "uvx",
+        "args": ["tellmphone", "serve", "--i-am", "gemini"],
+    }
+
+    assert "removed" in GeminiAdapter().unregister_mcp()
+    assert "tellmphone" not in json.loads(path.read_text())["mcpServers"]
 
 
 def test_register_replaces_existing(fake_bin, tmp_path):

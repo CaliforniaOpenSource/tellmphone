@@ -137,10 +137,12 @@ def load_adapters() -> dict[str, AgentAdapter]:
     """Built-in adapters, overridable/extendable via entry points."""
     from tellmphone.adapters.claude import ClaudeAdapter
     from tellmphone.adapters.codex import CodexAdapter
+    from tellmphone.adapters.gemini import GeminiAdapter
 
     adapters: dict[str, AgentAdapter] = {
         ClaudeAdapter.name: ClaudeAdapter(),
         CodexAdapter.name: CodexAdapter(),
+        GeminiAdapter.name: GeminiAdapter(),
     }
     for ep in entry_points(group="tellmphone.adapters"):
         try:

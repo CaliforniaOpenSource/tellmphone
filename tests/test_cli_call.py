@@ -33,7 +33,7 @@ def test_reply_with_no_open_calls(fake_bin, monkeypatch, home, project, capsys):
 
 def test_call_unknown_agent_fails(fake_bin, monkeypatch, home, project, capsys):
     monkeypatch.setenv("TELLMPHONE_HOME", str(home))
-    assert main(["call", "gemini", "hi", "--project", project]) == 1
+    assert main(["call", "opencode", "hi", "--project", project]) == 1
     assert "refused" in capsys.readouterr().out
 
 

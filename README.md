@@ -6,9 +6,9 @@
 
 TeLLMphone is a local MCP server that lets coding agents place calls to each
 other, or to another headless session of the same agent with a different
-personality or model. Claude Code can ring Codex with a question about the
+personality or model. Claude Code can ring Codex or Gemini with a question about the
 current project and get an answer back, keep that conversation going across
-multiple turns, or leave a voicemail for the next Codex session to pick up.
+multiple turns, or leave a voicemail for the next agent session to pick up.
 Conversations survive interruptions on both sides, and the callee can be
 given a saved personality and a specific model.
 
@@ -16,14 +16,14 @@ The second opinion you want is usually installed on the same machine, one
 terminal over — and you're tired of being the copy-paste layer between two
 AIs. Now they can just call each other.
 
-Currently supports Claude Code and Codex; other agents can be added as
+Currently supports Claude Code, Codex, and Gemini; other agents can be added as
 plugins.
 
 ## Requirements
 
 - macOS or Linux
 - Python 3.11+ and [uv](https://docs.astral.sh/uv/)
-- The agent CLIs you want to connect (`claude`, `codex`), installed and
+- The agent CLIs you want to connect (`claude`, `codex`, `agy`), installed and
   logged in
 
 ## Install
@@ -34,10 +34,10 @@ tellmphone install
 ```
 
 `install` registers the MCP server with every agent CLI it finds — via
-`claude mcp add` and `codex mcp add` — and sets the codex config needed for
-non-interactive tool approval. It is idempotent; rerun it if you move the
-checkout. `tellmphone uninstall` removes the registrations (it does not
-delete `~/.tellmphone/`).
+`claude mcp add`, `codex mcp add`, or Gemini's shared MCP config — and sets
+the config needed for non-interactive tool approval where the CLI requires it.
+It is idempotent; rerun it if you move the checkout. `tellmphone uninstall`
+removes the registrations (it does not delete `~/.tellmphone/`).
 
 ## Usage
 
@@ -84,10 +84,10 @@ The tools the agents get:
 
 There is no daemon. Each agent runs its own TeLLMphone instance over stdio;
 shared state lives under `~/.tellmphone/`. A call spawns the callee's CLI
-headlessly (`codex exec`, `claude -p`) in the project directory, records the
-callee's native session id under a stable call id, and replies resume that
-exact session (`codex exec resume`, `claude --resume`). If a native session
-is lost, the stored transcript is replayed into a fresh one. Callees run in
+headlessly (`codex exec`, `claude -p`, `agy --print`) in the project directory,
+records the callee's native session id under a stable call id, and replies resume
+that exact session where the CLI exposes one. If a native session is lost or not
+available, the stored transcript is replayed into a fresh one. Callees run in
 their CLI's read-only/sandboxed mode unless you allowlist a project for
 writes, and a hop limit keeps agents from chaining calls indefinitely.
 
@@ -147,7 +147,7 @@ uv sync
 uv run pytest
 ```
 
-The test suite runs against fake `claude`/`codex` executables, so it needs
+The test suite runs against fake `claude`/`codex`/`agy` executables, so it needs
 neither CLI installed nor network. From a checkout, `uv run tellmphone
 install` registers your development version with your agents.
 

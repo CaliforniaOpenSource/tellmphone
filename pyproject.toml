@@ -1,13 +1,13 @@
 [project]
 name = "tellmphone"
-version = "0.1.4"
+version = "0.1.5"
 description = "Let your LLMs call each other — a local MCP switchboard for coding agents"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "Kevin Dewald", email = "kevin@californiaopensource.com" }]
-keywords = ["mcp", "llm", "agents", "claude", "codex"]
+keywords = ["mcp", "llm", "agents", "claude", "codex", "gemini"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -36,6 +36,7 @@ tellmphone = "tellmphone.cli:main"
 [project.entry-points."tellmphone.adapters"]
 claude = "tellmphone.adapters.claude:ClaudeAdapter"
 codex = "tellmphone.adapters.codex:CodexAdapter"
+gemini = "tellmphone.adapters.gemini:GeminiAdapter"
 
 [dependency-groups]
 dev = ["pytest>=8"]

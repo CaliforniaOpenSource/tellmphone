@@ -78,6 +78,9 @@ def fake_bin(tmp_path, monkeypatch):
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    gemini_home = tmp_path / "gemini-home"
+    gemini_home.mkdir()
+    monkeypatch.setenv("GEMINI_HOME", str(gemini_home))
 
     def install(name: str, script: str):
         path = bin_dir / name

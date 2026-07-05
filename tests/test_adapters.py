@@ -1,10 +1,13 @@
 """Adapters exercised against fake claude/codex executables on PATH."""
 
+import json
+
 import pytest
 
 from tellmphone.adapters.base import SessionLost, SpawnRequest
 from tellmphone.adapters.claude import ClaudeAdapter
 from tellmphone.adapters.codex import CodexAdapter
+from tellmphone.adapters.gemini import GeminiAdapter
 from tellmphone.personalities import Personality
 
 FAKE_CLAUDE = '''#!/usr/bin/env python3
@@ -59,6 +62,29 @@ print(json.dumps({"type": "session_configured", "session_id": session_id}))
 print(json.dumps({"type": "item.completed", "item": {"type": "agent_message"}}))
 with open(out_file, "w") as fh:
     fh.write(f"codex answer to: {prompt}|model={model}")
+'''
+
+FAKE_AGY = '''#!/usr/bin/env python3
+import json, os, sys
+
+args = sys.argv[1:]
+
+def flag(name):
+    return args[args.index(name) + 1] if name in args else None
+
+session_id = flag("--conversation")
+if session_id == "lost-session":
+    sys.stderr.write("conversation does not exist: lost-session\\n")
+    sys.exit(1)
+
+print(json.dumps({
+    "argv": args,
+    "cwd": os.getcwd(),
+    "prompt": args[-1],
+    "model": flag("--model") or "",
+    "sandbox": "--sandbox" in args,
+    "skip_permissions": "--dangerously-skip-permissions" in args,
+}))
 '''
 
 
@@ -142,3 +168,73 @@ class TestCodexAdapter:
         assert turn.session_id == "codex-sess-9"
         with pytest.raises(SessionLost):
             adapter.resume("lost-session", "again", req)
+
+
+class TestGeminiAdapter:
+    def test_spawn_uses_sandbox_and_prompt_last(self, fake_bin, req, project):
+        fake_bin("agy", FAKE_AGY)
+        turn = GeminiAdapter().spawn(req)
+        data = json.loads(turn.text)
+        assert data["argv"] == ["--print", "--sandbox", "hello there"]
+        assert data["prompt"] == "hello there"
+        assert data["cwd"] == project
+        assert turn.session_id is None
+
+    def test_write_access_skips_interactive_permissions(self, fake_bin, req):
+        fake_bin("agy", FAKE_AGY)
+        req.write_access = True
+        data = json.loads(GeminiAdapter().spawn(req).text)
+        assert data["argv"] == [
+            "--print",
+            "--sandbox",
+            "--dangerously-skip-permissions",
+            "hello there",
+        ]
+        assert data["skip_permissions"] is True
+        assert data["sandbox"] is True
+
+    def test_model_flag_stays_before_prompt(self, fake_bin, req):
+        fake_bin("agy", FAKE_AGY)
+        req.model = "Gemini 3.1 Pro (High)"
+        data = json.loads(GeminiAdapter().spawn(req).text)
+        assert data["argv"] == [
+            "--print",
+            "--model",
+            "Gemini 3.1 Pro (High)",
+            "--sandbox",
+            "hello there",
+        ]
+        assert data["model"] == "Gemini 3.1 Pro (High)"
+
+    def test_personality_becomes_preamble(self, fake_bin, req):
+        fake_bin("agy", FAKE_AGY)
+        req.personality = Personality(name="g", description="", body="Be grumpy.")
+        data = json.loads(GeminiAdapter().spawn(req).text)
+        assert "Be grumpy." in data["prompt"]
+        assert data["prompt"].endswith("hello there")
+
+    def test_empty_body_personality_injects_nothing(self, fake_bin, req):
+        fake_bin("agy", FAKE_AGY)
+        req.personality = Personality(name="neutral", description="", body="")
+        data = json.loads(GeminiAdapter().spawn(req).text)
+        assert data["prompt"] == "hello there"
+
+    def test_resume_preserves_existing_session_and_session_lost(self, fake_bin, req):
+        fake_bin("agy", FAKE_AGY)
+        adapter = GeminiAdapter()
+        turn = adapter.resume("agy-sess-9", "again", req)
+        data = json.loads(turn.text)
+        assert data["argv"] == [
+            "--conversation",
+            "agy-sess-9",
+            "--print",
+            "--sandbox",
+            "again",
+        ]
+        assert turn.session_id == "agy-sess-9"
+        with pytest.raises(SessionLost):
+            adapter.resume("lost-session", "again", req)
+
+    def test_available(self, fake_bin):
+        fake_bin("agy", FAKE_AGY)
+        assert GeminiAdapter().available()
