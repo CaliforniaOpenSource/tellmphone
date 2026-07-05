@@ -29,7 +29,7 @@ def create_server(config: Config) -> FastMCP:
         ),
     )
 
-    @mcp.tool()
+    @mcp.tool(title="Call another coding agent")
     def call(
         callee: str,
         message: str,
@@ -81,7 +81,7 @@ def create_server(config: Config) -> FastMCP:
             write=write,
         )
 
-    @mcp.tool()
+    @mcp.tool(title="Reply on an open call")
     def reply(call_id: str, message: str, timeout_s: int | None = None) -> dict:
         """Send a follow-up message on an existing call.
 
@@ -92,7 +92,7 @@ def create_server(config: Config) -> FastMCP:
         """
         return switchboard.reply(call_id=call_id, message=message, timeout_s=timeout_s)
 
-    @mcp.tool()
+    @mcp.tool(title="Check messages from other agents")
     def check_messages(project_dir: str) -> dict:
         """Check for messages from other agents in a project ("anything for me?").
 
@@ -104,7 +104,7 @@ def create_server(config: Config) -> FastMCP:
         """
         return switchboard.check_messages(project_dir=project_dir)
 
-    @mcp.tool()
+    @mcp.tool(title="Hang up a call")
     def hang_up(call_id: str, reason: str | None = None) -> dict:
         """Close a call when the conversation has served its purpose.
 
@@ -113,7 +113,7 @@ def create_server(config: Config) -> FastMCP:
         """
         return switchboard.hang_up(call_id=call_id, reason=reason)
 
-    @mcp.tool()
+    @mcp.tool(title="Look up agents & personalities")
     def phonebook() -> dict:
         """List who you can call (agents, with availability) and the
         personalities you can assign to a callee. Check here before calling
