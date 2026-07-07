@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from tellmphone.adapters.base import SessionLost, SpawnRequest
+from tellmphone.adapters.base import SessionLost, SpawnRequest, scrubbed_env
 from tellmphone.adapters.claude import ClaudeAdapter
 from tellmphone.adapters.codex import CodexAdapter
 from tellmphone.adapters.gemini import GeminiAdapter
@@ -97,6 +97,25 @@ def req(project):
 
 
 class TestClaudeAdapter:
+    def test_scrubbed_env_preserves_claude_auth_and_gateway_config(self, monkeypatch):
+        monkeypatch.setenv("CLAUDECODE", "1")
+        monkeypatch.setenv("CLAUDE_CODE_CHILD_SESSION", "1")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-session")
+        monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "token")
+        monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+        monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://gateway.example")
+        monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "gateway-token")
+
+        env = scrubbed_env()
+
+        assert "CLAUDECODE" not in env
+        assert "CLAUDE_CODE_CHILD_SESSION" not in env
+        assert "CLAUDE_CODE_SESSION_ID" not in env
+        assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "token"
+        assert env["CLAUDE_CODE_USE_BEDROCK"] == "1"
+        assert env["ANTHROPIC_BASE_URL"] == "https://gateway.example"
+        assert env["ANTHROPIC_AUTH_TOKEN"] == "gateway-token"
+
     def test_spawn_parses_json(self, fake_bin, req, project):
         fake_bin("claude", FAKE_CLAUDE)
         turn = ClaudeAdapter().spawn(req)

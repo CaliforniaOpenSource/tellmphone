@@ -18,18 +18,28 @@ from tellmphone.personalities import Personality
 
 SERVER_NAME = "tellmphone"
 
+_HOST_CLAUDE_MARKERS = {
+    "CLAUDECODE",
+    "CLAUDE_CODE_BRIDGE_SESSION_ID",
+    "CLAUDE_CODE_CHILD_SESSION",
+    "CLAUDE_CODE_REMOTE_SESSION_ID",
+    "CLAUDE_CODE_SESSION_ID",
+}
+
 
 def scrubbed_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     """os.environ minus the host agent's session markers.
 
     Claude Code refuses to start when it detects it is nested inside another
-    Claude Code process via these variables — and they describe the host, not
-    the child, so they are lies in any subprocess we spawn.
+    Claude Code process via these variables - and they describe the host, not
+    the child, so they are lies in any subprocess we spawn. Other
+    CLAUDE_CODE_* variables can be real auth, provider, or gateway config and
+    must pass through.
     """
     env = {
         k: v
         for k, v in os.environ.items()
-        if k != "CLAUDECODE" and not k.startswith("CLAUDE_CODE_")
+        if k not in _HOST_CLAUDE_MARKERS
     }
     if extra:
         env.update(extra)

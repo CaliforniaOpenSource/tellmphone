@@ -428,12 +428,13 @@ Learned while building; the sections above remain the intent.
 
 - **Nested-Claude guard.** Claude Code refuses to start when it detects it is
   running inside another Claude Code process (via `CLAUDECODE` /
-  `CLAUDE_CODE_*` environment variables). Adapters therefore scrub those
-  variables from every callee subprocess environment (`AgentAdapter.child_env`)
-  — the markers describe the host, not the child, so removing them is
-  correcting a lie, not evading a safety check we care about; TeLLMphone's
-  own hop limit (`TELLMPHONE_HOP`, set in the same place) is what prevents
-  runaway nesting.
+  `CLAUDE_CODE_CHILD_SESSION` and related session-id environment variables).
+  Adapters therefore scrub only those host session markers from every callee
+  subprocess environment (`AgentAdapter.child_env`). Other `CLAUDE_CODE_*`
+  variables can carry auth, provider, or gateway config and must pass through.
+  The markers describe the host, not the child, so removing them is correcting
+  a lie, not evading a safety check we care about; TeLLMphone's own hop limit
+  (`TELLMPHONE_HOP`, set in the same place) is what prevents runaway nesting.
 - **`reply` is direction-aware.** When the *caller* replies, the callee is
   driven headlessly (resume/spawn). When the *callee* replies — answering a
   voicemail from its own live session — no subprocess runs at all: the answer
