@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 CALL_ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"  # no i/l/o/u lookalikes
 CALL_ID_LENGTH = 8
@@ -53,9 +53,15 @@ class CallRecord(BaseModel):
     created_at: datetime
     last_activity_at: datetime
     unread_for: list[str] = Field(default_factory=list)
+    last_read_seq: dict[str, int] = Field(default_factory=dict)
     closed_reason: str | None = None
     last_error: str | None = None
     resumed_via: str | None = None  # "transcript-replay" when the native session was lost
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def _legacy_working_is_ringing(cls, value):
+        return "ringing" if value == "working" else value
 
 
 class TranscriptEntry(BaseModel):
@@ -66,7 +72,7 @@ class TranscriptEntry(BaseModel):
     to: str
     body: str
     ts: datetime
-    kind: Literal["message", "system"] = "message"
+    kind: Literal["message", "progress", "system"] = "message"
 
 
 class CallBusy(Exception):
@@ -99,6 +105,14 @@ def _atomic_write(path: Path, text: str) -> None:
     tmp.write_text(text)
     os.chmod(tmp, 0o600)
     os.replace(tmp, path)
+
+
+def _parse_transcript(lines: list[str]) -> list[TranscriptEntry]:
+    return [
+        TranscriptEntry.model_validate_json(line)
+        for line in lines
+        if line.strip()
+    ]
 
 
 class Store:
@@ -187,11 +201,13 @@ class Store:
         concurrent writers can never share a seq or interleave lines.
         """
         path = self.call_dir(call_id) / "transcript.jsonl"
-        with open(path, "a") as fh:
+        with open(path, "a+") as fh:
             fcntl.flock(fh, fcntl.LOCK_EX)
             try:
-                transcript = self.read_transcript(call_id)
+                fh.seek(0)
+                transcript = _parse_transcript(fh.read().splitlines())
                 entry.seq = transcript[-1].seq + 1 if transcript else 1
+                fh.seek(0, os.SEEK_END)
                 fh.write(entry.model_dump_json(by_alias=True) + "\n")
                 fh.flush()
             finally:
@@ -203,11 +219,12 @@ class Store:
         path = self.call_dir(call_id) / "transcript.jsonl"
         if not path.exists():
             return []
-        return [
-            TranscriptEntry.model_validate_json(line)
-            for line in path.read_text().splitlines()
-            if line.strip()
-        ]
+        with open(path) as fh:
+            fcntl.flock(fh, fcntl.LOCK_SH)
+            try:
+                return _parse_transcript(fh.read().splitlines())
+            finally:
+                fcntl.flock(fh, fcntl.LOCK_UN)
 
     # -- locking ---------------------------------------------------------------
 

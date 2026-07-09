@@ -82,8 +82,7 @@ class GeminiAdapter(AgentAdapter):
             cmd += ["--model", req.model]
         cmd += ["--add-dir", req.project_dir]
         cmd.append("--sandbox")
-        if req.write_access:
-            cmd.append("--dangerously-skip-permissions")
+        cmd += ["--mode", "accept-edits" if req.write_access else "plan"]
         cmd += ["--print", prompt]
 
         proc = subprocess.run(

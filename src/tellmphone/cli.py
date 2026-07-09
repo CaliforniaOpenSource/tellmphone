@@ -81,6 +81,8 @@ def _cmd_call(args) -> int:
         mode=args.mode,
         write=args.write,
     )
+    if result.get("status") == "ringing" and args.mode == "wait":
+        result = board.wait(result["call_id"], args.timeout)
     return _print_turn(result, started)
 
 
@@ -104,7 +106,25 @@ def _cmd_reply(args) -> int:
         call_id = max(mine, key=lambda r: r.last_activity_at).call_id
     print(f"☎ {call_id}…", flush=True)
     started = time.monotonic()
-    return _print_turn(board.reply(call_id, args.message), started)
+    result = board.reply(call_id, args.message)
+    if result.get("status") == "ringing":
+        result = board.wait(call_id, args.timeout)
+    return _print_turn(result, started)
+
+
+def _cmd_turn(args) -> int:
+    from tellmphone.adapters import load_adapters
+    from tellmphone.config import load_config
+    from tellmphone.store import Store
+    from tellmphone.switchboard import Switchboard
+
+    home = Path(args.home).expanduser() if args.home else None
+    store = Store(home or load_config(i_am="turn").home)
+    record = store.load_call(args.call_id)
+    cfg = load_config(i_am=record.callee.agent, home=home)
+    board = Switchboard(cfg, store, load_adapters())
+    result = board.run_turn(args.call_id)
+    return 0 if result["status"] in ("answered", "closed", "busy") else 1
 
 
 def _cmd_messages(args) -> int:
@@ -119,6 +139,8 @@ def _cmd_messages(args) -> int:
             print(f"\n{msg['call_id']} from {msg['from']} at {msg['ts']}")
             if msg.get("personality"):
                 print(f"personality: {msg['personality']}")
+            if msg.get("kind") and msg.get("kind") != "message":
+                print(f"kind: {msg['kind']}")
             print(msg.get("body") or msg.get("preview", ""))
     else:
         print(f"no unread messages for {args.as_name} in {project}")
@@ -275,7 +297,7 @@ def main(argv: list[str] | None = None) -> int:
         help="wait for an answer or leave voicemail",
     )
     call.add_argument("--as", dest="as_name", default="human", help=argparse.SUPPRESS)
-    call.add_argument("--timeout", type=int, help="seconds before rolling to voicemail")
+    call.add_argument("--timeout", type=int, help="seconds before returning ringing")
     call.add_argument(
         "--write", action="store_true", help="let the callee edit files in the project"
     )
@@ -285,7 +307,7 @@ def main(argv: list[str] | None = None) -> int:
     reply.add_argument("message")
     reply.add_argument("--project", default=".", help="project directory (default: cwd)")
     reply.add_argument("--as", dest="as_name", default="human", help=argparse.SUPPRESS)
-    reply.add_argument("--timeout", type=int, help="seconds before rolling to voicemail")
+    reply.add_argument("--timeout", type=int, help="seconds before returning ringing")
 
     messages = sub.add_parser("messages", help="show unread messages and open calls")
     messages.add_argument("--project", default=".", help="project directory (default: cwd)")
@@ -306,6 +328,10 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("personalities", help="list installed personalities")
     sub.add_parser("version", help="print version")
 
+    turn = sub.add_parser("turn", help=argparse.SUPPRESS)
+    turn.add_argument("call_id")
+    turn.add_argument("--home", help=argparse.SUPPRESS)
+
     args = parser.parse_args(argv)
 
     if args.command == "install":
@@ -316,6 +342,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_call(args)
     if args.command == "reply":
         return _cmd_reply(args)
+    if args.command == "turn":
+        return _cmd_turn(args)
     if args.command == "messages":
         return _cmd_messages(args)
     if args.command == "show":

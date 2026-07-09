@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 HOP_ENV = "TELLMPHONE_HOP"
+CALL_ID_ENV = "TELLMPHONE_CALL_ID"
 HOME_ENV = "TELLMPHONE_HOME"
 
 DEFAULT_TIMEOUT_S = 300
@@ -42,6 +43,7 @@ class Config:
     # Per-agent defaults ([agents.<name>] in config.toml), e.g. a default model.
     agents: dict[str, AgentDefaults] = field(default_factory=dict)
     hop_count: int = 0
+    call_id: str | None = None
 
     def permissions_for(self, project_dir: str | Path) -> ProjectPermissions:
         canonical = str(Path(project_dir).expanduser().resolve())
@@ -55,6 +57,7 @@ def load_config(i_am: str, home: Path | None = None) -> Config:
     home = home or tellmphone_home()
     cfg = Config(i_am=i_am, home=home)
     cfg.hop_count = int(os.environ.get(HOP_ENV, "0"))
+    cfg.call_id = os.environ.get(CALL_ID_ENV)
 
     path = home / "config.toml"
     if path.exists():

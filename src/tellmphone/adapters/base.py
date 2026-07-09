@@ -12,7 +12,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from importlib.metadata import entry_points
 
-from tellmphone.config import HOP_ENV
+from tellmphone.config import CALL_ID_ENV, HOP_ENV
 from tellmphone.personalities import Personality
 
 
@@ -62,6 +62,7 @@ class SpawnRequest:
     model: str | None = None  # passed through to the CLI; the CLI validates it
     write_access: bool = False
     hop_count: int = 1
+    call_id: str | None = None
 
 
 @dataclass
@@ -89,7 +90,10 @@ class AgentAdapter(ABC):
     def child_env(self, req: SpawnRequest) -> dict[str, str]:
         """Scrubbed environment plus the hop count, so a callee's own
         TeLLMphone refuses runaway chains."""
-        return scrubbed_env({HOP_ENV: str(req.hop_count)})
+        extra = {HOP_ENV: str(req.hop_count)}
+        if req.call_id:
+            extra[CALL_ID_ENV] = req.call_id
+        return scrubbed_env(extra)
 
     def register_mcp(self, server_argv: list[str]) -> str:
         """Register the TeLLMphone MCP server with this agent's CLI.
@@ -148,11 +152,13 @@ def load_adapters() -> dict[str, AgentAdapter]:
     from tellmphone.adapters.claude import ClaudeAdapter
     from tellmphone.adapters.codex import CodexAdapter
     from tellmphone.adapters.gemini import GeminiAdapter
+    from tellmphone.adapters.grok import GrokAdapter
 
     adapters: dict[str, AgentAdapter] = {
         ClaudeAdapter.name: ClaudeAdapter(),
         CodexAdapter.name: CodexAdapter(),
         GeminiAdapter.name: GeminiAdapter(),
+        GrokAdapter.name: GrokAdapter(),
     }
     for ep in entry_points(group="tellmphone.adapters"):
         try:

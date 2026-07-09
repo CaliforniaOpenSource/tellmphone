@@ -10,8 +10,10 @@ Invariants:
 
 from __future__ import annotations
 
-import threading
-from dataclasses import dataclass
+import os
+import subprocess
+import sys
+import time
 from pathlib import Path
 
 from tellmphone.adapters.base import (
@@ -20,10 +22,9 @@ from tellmphone.adapters.base import (
     SessionLost,
     SpawnRequest,
 )
-from tellmphone.config import Config
+from tellmphone.config import CALL_ID_ENV, HOME_ENV, HOP_ENV, Config
 from tellmphone.personalities import Personality, PersonalityBook, PersonalityError
 from tellmphone.store import (
-    CallBusy,
     CallNotFound,
     CallRecord,
     Party,
@@ -46,20 +47,19 @@ def _frame_message(message: str, context: str | None) -> str:
     return f"Background context:\n{context}\n\nYour task:\n{message}"
 
 
-@dataclass
-class _TurnResult:
-    ok: bool = False
-    text: str = ""
-    usage: dict | None = None
-    error: str = ""
-
-
 class Switchboard:
-    def __init__(self, config: Config, store: Store, adapters: dict[str, AgentAdapter]):
+    def __init__(
+        self,
+        config: Config,
+        store: Store,
+        adapters: dict[str, AgentAdapter],
+        detach_turns: bool = True,
+    ):
         self.config = config
         self.store = store
         self.adapters = adapters
         self.personalities = PersonalityBook(store.personalities_dir)
+        self.detach_turns = detach_turns
 
     # ------------------------------------------------------------------ call
 
@@ -171,8 +171,7 @@ class Switchboard:
                 self.store.save_call(record)
             return {"call_id": record.call_id, "status": "failed", "error": record.last_error}
 
-        req = self._spawn_request(record, _frame_message(message, context), persona)
-        return self._live_turn(record, timeout_s, lambda: adapter.spawn(req))
+        return self._start_turn(record)
 
     # ----------------------------------------------------------------- reply
 
@@ -188,19 +187,6 @@ class Switchboard:
             return {
                 "status": "error",
                 "error": f"no call {call_id!r}; use check_messages to list open calls",
-            }
-
-        if record.status == "closed":
-            return {
-                "call_id": call_id,
-                "status": "error",
-                "error": "this call was hung up; place a new call instead",
-            }
-        if record.status == "ringing":
-            return {
-                "call_id": call_id,
-                "status": "busy",
-                "note": "the line is engaged (a turn is still running); check_messages later",
             }
 
         me = self.config.i_am
@@ -223,29 +209,15 @@ class Switchboard:
                 "error": f"{record.callee.agent} CLI is not available",
             }
 
-        self._append(record, me, record.callee.agent, message)
-        persona = self._persona_of(record)
-        req = self._spawn_request(record, message, persona)
-        session_id = record.callee.session_id
+        with self.store.call_lock(record.call_id):
+            record = self.store.load_call(call_id)
+            if status_error := self._reply_status_error(record):
+                return status_error
+            self._append(record, me, record.callee.agent, message)
+            record.status = "ringing"
+            self.store.save_call(record)
 
-        def run_turn():
-            if session_id is None:
-                # voicemail being converted to a live call, or first live turn
-                replay_req = self._spawn_request(
-                    record, self._replay_prompt(record), persona
-                )
-                record.resumed_via = "transcript-replay"
-                return adapter.spawn(replay_req)
-            try:
-                return adapter.resume(session_id, message, req)
-            except SessionLost:
-                replay_req = self._spawn_request(
-                    record, self._replay_prompt(record), persona
-                )
-                record.resumed_via = "transcript-replay"
-                return adapter.spawn(replay_req)
-
-        return self._live_turn(record, timeout_s, run_turn, message_already_logged=True)
+        return self._start_turn(record)
 
     def _reply_as_callee(self, record: CallRecord, message: str) -> dict:
         """Answering machine path: the callee agent answers a voicemail.
@@ -254,6 +226,9 @@ class Switchboard:
         unread for the caller, who will pull it via check_messages.
         """
         with self.store.call_lock(record.call_id):
+            record = self.store.load_call(record.call_id)
+            if status_error := self._reply_status_error(record):
+                return status_error
             self._append(record, record.callee.agent, record.caller.agent, message)
             record.status = "answered"
             if record.caller.agent not in record.unread_for:
@@ -265,52 +240,102 @@ class Switchboard:
             "note": f"reply delivered to {record.caller.agent}'s mailbox for this project",
         }
 
+    def _reply_status_error(self, record: CallRecord) -> dict | None:
+        if record.status == "closed":
+            return {
+                "call_id": record.call_id,
+                "status": "error",
+                "error": "this call was hung up; place a new call instead",
+            }
+        if record.status == "failed":
+            return {
+                "call_id": record.call_id,
+                "status": "error",
+                "error": "this call failed; place a new call instead",
+            }
+        if record.status == "ringing":
+            return self._busy_reply(record.call_id)
+        return None
+
+    def _busy_reply(self, call_id: str) -> dict:
+        return {
+            "call_id": call_id,
+            "status": "busy",
+            "note": "the line is engaged (a turn is still running); check_messages later",
+        }
+
     # -------------------------------------------------------------- mailbox
 
     def check_messages(self, project_dir: str) -> dict:
         me = self.config.i_am
         unread, open_calls = [], []
         for record in self.store.calls_for_project(project_dir):
-            other = (
-                record.callee.agent
-                if me == record.caller.agent
-                else record.caller.agent
-            )
-            if me in record.unread_for:
-                transcript = self.store.read_transcript(record.call_id)
-                incoming = [e for e in transcript if e.to == me and e.kind == "message"]
-                last = incoming[-1] if incoming else None
-                unread.append(
-                    {
-                        "call_id": record.call_id,
-                        "from": other,
-                        "personality": record.callee.personality,
-                        "preview": _preview(last.body) if last else "",
-                        "body": last.body if last else "",
-                        "ts": last.ts.isoformat() if last else record.last_activity_at.isoformat(),
-                    }
+            if me not in (record.caller.agent, record.callee.agent):
+                continue
+            with self.store.call_lock(record.call_id):
+                fresh = self.store.load_call(record.call_id)
+                other = (
+                    fresh.callee.agent
+                    if me == fresh.caller.agent
+                    else fresh.caller.agent
                 )
-                with self.store.call_lock(record.call_id):
-                    fresh = self.store.load_call(record.call_id)
+                incoming = []
+                if me in fresh.unread_for:
+                    transcript = self.store.read_transcript(fresh.call_id)
+                    last_read = fresh.last_read_seq.get(me, 0)
+                    incoming = [
+                        e
+                        for e in transcript
+                        if (
+                            e.to == me
+                            and e.kind in ("message", "progress")
+                            and e.seq > last_read
+                        )
+                    ]
+                    if incoming:
+                        fresh.last_read_seq[me] = max(e.seq for e in incoming)
                     if me in fresh.unread_for:
                         fresh.unread_for.remove(me)
-                        self.store.save_call(fresh)
-            if record.status in ("ringing", "answered", "voicemail") and me in (
-                record.caller.agent,
-                record.callee.agent,
-            ):
+                    self.store.save_call(fresh)
+                include_open = fresh.status in ("ringing", "answered", "voicemail")
+
+            unread.extend(
+                {
+                    "call_id": fresh.call_id,
+                    "from": entry.from_,
+                    "personality": fresh.callee.personality,
+                    "kind": entry.kind,
+                    "seq": entry.seq,
+                    "preview": _preview(entry.body),
+                    "body": entry.body,
+                    "ts": entry.ts.isoformat(),
+                    "is_final": entry.kind == "message",
+                }
+                for entry in incoming
+            )
+            if include_open:
                 open_calls.append(
                     {
-                        "call_id": record.call_id,
+                        "call_id": fresh.call_id,
                         "with": other,
-                        "status": record.status,
-                        "last_activity_at": record.last_activity_at.isoformat(),
+                        "status": fresh.status,
+                        "last_activity_at": fresh.last_activity_at.isoformat(),
                     }
                 )
         return {
             "unread": unread,
             "open_calls": open_calls,
             "note": "use reply(call_id, message) to continue any of these",
+        }
+
+    # ----------------------------------------------------------- progress
+
+    def report_progress(self, message: str, call_id: str | None = None) -> dict:
+        call_id = call_id or self.config.call_id
+        return {
+            "call_id": call_id,
+            "status": "refused",
+            "reason": "progress reporting is not supported in this async-turn version; poll check_messages for the final answer",
         }
 
     # -------------------------------------------------------------- hang up
@@ -365,6 +390,7 @@ class Switchboard:
             write_access=record.write
             or self.config.permissions_for(record.project_dir).write,
             hop_count=record.hop_count,
+            call_id=record.call_id,
         )
 
     def _persona_of(self, record: CallRecord):
@@ -382,10 +408,10 @@ class Switchboard:
         except PersonalityError:
             return None  # old call record without a body snapshot
 
-    def _append(self, record, from_, to, body, kind="message") -> None:
+    def _append(self, record, from_, to, body, kind="message"):
         # seq is assigned inside append_transcript, atomically under the
         # transcript's own lock — safe with or without call.lock held.
-        self.store.append_transcript(
+        return self.store.append_transcript(
             record.call_id,
             TranscriptEntry(from_=from_, to=to, body=body, ts=utcnow(), kind=kind),
         )
@@ -404,91 +430,181 @@ class Switchboard:
                 lines.append(f"[{entry.from_}]: {entry.body}")
         return "\n".join(lines)
 
-    def _live_turn(
-        self,
-        record: CallRecord,
-        timeout_s: int | None,
-        run,
-        message_already_logged: bool = False,
-    ) -> dict:
-        """Run one callee turn with wait-then-voicemail timeout semantics.
-
-        The worker always finishes the bookkeeping (transcript + unread flag),
-        even after the tool call has returned "ringing" — a slow answer lands
-        in the mailbox instead of being lost. Requires the MCP server process
-        to stay alive, which it does for the length of the host agent session
-        (open question §14.4 covers the crash case).
-        """
-        timeout_s = timeout_s or self.config.timeout_s
-        with self.store.call_lock(record.call_id):
-            record.status = "ringing"
-            self.store.save_call(record)
-        result = _TurnResult()
-
-        def worker():
-            # The turn can run for minutes; check_messages and hang_up may
-            # commit in between. Reload under the lock and touch only this
-            # turn's fields, so the save can't resurrect cleared unread flags
-            # or reopen a call that was hung up mid-turn.
-            try:
-                turn = run()
-                result.ok, result.text, result.usage = True, turn.text, turn.usage
-                with self.store.call_lock(record.call_id):
-                    fresh = self.store.load_call(record.call_id)
-                    fresh.callee.session_id = turn.session_id or fresh.callee.session_id
-                    if record.resumed_via:
-                        fresh.resumed_via = record.resumed_via
-                    self._append(fresh, fresh.callee.agent, fresh.caller.agent, turn.text)
-                    if fresh.status != "closed":
-                        fresh.status = "answered"
-                        if fresh.caller.agent not in fresh.unread_for:
-                            fresh.unread_for.append(fresh.caller.agent)
-                    self.store.save_call(fresh)
-            except AdapterError as exc:
-                result.error = str(exc)
-                with self.store.call_lock(record.call_id):
-                    fresh = self.store.load_call(record.call_id)
-                    fresh.last_error = result.error
-                    if fresh.status != "closed":
-                        fresh.status = "failed"
-                    self.store.save_call(fresh)
-
-        thread = threading.Thread(target=worker, daemon=False)
-        thread.start()
-        thread.join(timeout_s)
-
-        if thread.is_alive():
+    def _start_turn(self, record: CallRecord) -> dict:
+        if not self.detach_turns:
             return {
                 "call_id": record.call_id,
                 "status": "ringing",
-                "note": (
-                    f"{record.callee.agent} is still working (>{timeout_s}s); the answer "
-                    "will land in this project's mailbox — poll with check_messages"
-                ),
+                "note": f"{record.callee.agent} is working; poll check_messages for the answer",
             }
+        cmd = [
+            sys.executable,
+            "-m",
+            "tellmphone.cli",
+            "turn",
+            record.call_id,
+            "--home",
+            str(self.config.home),
+        ]
+        call_dir = self.store.call_dir(record.call_id)
+        env = os.environ.copy()
+        env[HOME_ENV] = str(self.config.home)
+        env[HOP_ENV] = str(record.hop_count)
+        env[CALL_ID_ENV] = record.call_id
+        try:
+            with open(call_dir / "turn.stdout", "ab") as stdout, open(
+                call_dir / "turn.stderr", "ab"
+            ) as stderr:
+                subprocess.Popen(
+                    cmd,
+                    cwd=record.project_dir,
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout,
+                    stderr=stderr,
+                    start_new_session=True,
+                    close_fds=True,
+                )
+        except OSError as exc:
+            with self.store.call_lock(record.call_id):
+                fresh = self.store.load_call(record.call_id)
+                fresh.status = "failed"
+                fresh.last_error = f"failed to start turn process: {exc}"
+                self.store.save_call(fresh)
+            return {"call_id": record.call_id, "status": "failed", "error": fresh.last_error}
+        return {
+            "call_id": record.call_id,
+            "status": "ringing",
+            "note": f"{record.callee.agent} is working; poll check_messages for the answer",
+        }
 
-        if not result.ok:
-            return {"call_id": record.call_id, "status": "failed", "error": result.error}
+    def run_turn(self, call_id: str) -> dict:
+        try:
+            record = self.store.load_call(call_id)
+        except CallNotFound:
+            return {"status": "error", "error": f"no call {call_id!r}"}
 
-        # Delivered inline; don't leave it flagged unread as well.
+        adapter = self.adapters.get(record.callee.agent)
+        if adapter is None or not adapter.available():
+            return self._fail_turn(call_id, f"{record.callee.agent} CLI is not available")
+
+        turn_lock_path = self.store.call_dir(call_id) / "turn.lock"
+        with open(turn_lock_path, "w") as lock_fh:
+            try:
+                import fcntl
+
+                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return {"call_id": call_id, "status": "busy"}
+            try:
+                with self.store.call_lock(call_id):
+                    record = self.store.load_call(call_id)
+                    if record.status != "ringing":
+                        return {"call_id": call_id, "status": record.status}
+                return self._run_adapter_turn(record, adapter)
+            finally:
+                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+
+    def _run_adapter_turn(self, record: CallRecord, adapter: AgentAdapter) -> dict:
+        persona = self._persona_of(record)
+        transcript = [
+            e
+            for e in self.store.read_transcript(record.call_id)
+            if e.kind == "message"
+        ]
+        incoming = [e for e in transcript if e.to == record.callee.agent]
+        message = incoming[-1].body if incoming else self._replay_prompt(record)
+        req = self._spawn_request(record, message, persona)
+        resumed_via = None
+        try:
+            if record.callee.session_id and incoming:
+                try:
+                    turn = adapter.resume(record.callee.session_id, message, req)
+                except SessionLost:
+                    replay_req = self._spawn_request(
+                        record, self._replay_prompt(record), persona
+                    )
+                    turn = adapter.spawn(replay_req)
+                    resumed_via = "transcript-replay"
+            else:
+                if len(transcript) == 1:
+                    prompt = message
+                else:
+                    prompt = self._replay_prompt(record)
+                    resumed_via = "transcript-replay"
+                turn = adapter.spawn(self._spawn_request(record, prompt, persona))
+        except AdapterError as exc:
+            return self._fail_turn(record.call_id, str(exc))
+
         with self.store.call_lock(record.call_id):
             fresh = self.store.load_call(record.call_id)
-            if record.caller.agent in fresh.unread_for:
-                fresh.unread_for.remove(record.caller.agent)
-                self.store.save_call(fresh)
-
-        response: dict = {
+            if fresh.status == "closed":
+                return {"call_id": record.call_id, "status": "closed"}
+            fresh.callee.session_id = turn.session_id or fresh.callee.session_id
+            if resumed_via:
+                fresh.resumed_via = resumed_via
+            self._append(fresh, fresh.callee.agent, fresh.caller.agent, turn.text)
+            fresh.status = "answered"
+            if fresh.caller.agent not in fresh.unread_for:
+                fresh.unread_for.append(fresh.caller.agent)
+            self.store.save_call(fresh)
+        return {
             "call_id": record.call_id,
             "status": "answered",
             "from": record.callee.agent,
-            "response": result.text,
+            "response": turn.text,
         }
-        if record.callee.personality:
-            response["personality"] = record.callee.personality
-        if record.callee.model:
-            response["model"] = record.callee.model
-        if record.resumed_via:
-            response["resumed_via"] = record.resumed_via
-        if result.usage:
-            response["usage"] = result.usage
-        return response
+
+    def _fail_turn(self, call_id: str, error: str) -> dict:
+        with self.store.call_lock(call_id):
+            record = self.store.load_call(call_id)
+            record.last_error = error
+            if record.status != "closed":
+                record.status = "failed"
+            self.store.save_call(record)
+        return {"call_id": call_id, "status": record.status, "error": error}
+
+    def wait(self, call_id: str, timeout_s: int | None = None) -> dict:
+        deadline = time.monotonic() + (timeout_s or self.config.timeout_s)
+        while True:
+            try:
+                record = self.store.load_call(call_id)
+            except CallNotFound:
+                return {"status": "error", "error": f"no call {call_id!r}"}
+            if record.status != "ringing":
+                if record.status == "answered":
+                    final = self._mark_call_read_and_get_final(call_id)
+                    return {
+                        "call_id": call_id,
+                        "status": "answered",
+                        "from": record.callee.agent,
+                        "response": final.body if final else "",
+                    }
+                if record.status == "failed":
+                    return {"call_id": call_id, "status": "failed", "error": record.last_error}
+                return {"call_id": call_id, "status": record.status}
+            if time.monotonic() >= deadline:
+                return {
+                    "call_id": call_id,
+                    "status": "ringing",
+                    "note": f"{record.callee.agent} is still working; poll check_messages for the answer",
+                }
+            time.sleep(0.05)
+
+    def _mark_call_read_and_get_final(self, call_id: str) -> TranscriptEntry | None:
+        me = self.config.i_am
+        with self.store.call_lock(call_id):
+            record = self.store.load_call(call_id)
+            transcript = self.store.read_transcript(call_id)
+            incoming = [
+                e
+                for e in transcript
+                if e.to == me and e.kind in ("message", "progress")
+            ]
+            if incoming:
+                record.last_read_seq[me] = max(e.seq for e in incoming)
+            if me in record.unread_for:
+                record.unread_for.remove(me)
+            self.store.save_call(record)
+        finals = [e for e in incoming if e.kind == "message"]
+        return finals[-1] if finals else None

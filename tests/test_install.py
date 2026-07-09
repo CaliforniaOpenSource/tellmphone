@@ -6,6 +6,7 @@ import shlex
 from tellmphone.adapters.claude import ClaudeAdapter
 from tellmphone.adapters.codex import CodexAdapter
 from tellmphone.adapters.gemini import GeminiAdapter
+from tellmphone.adapters.grok import GrokAdapter
 from tellmphone.cli import main
 
 RECORDING_CLI = '''#!/usr/bin/env python3
@@ -88,6 +89,16 @@ def test_gemini_register_writes_shared_mcp_config(fake_bin, tmp_path, monkeypatc
     assert "tellmphone" not in json.loads(path.read_text())["mcpServers"]
 
 
+def test_grok_register(fake_bin, tmp_path):
+    log, script = recording_cli(tmp_path, "grok")
+    fake_bin("grok", script)
+    result = GrokAdapter().register_mcp(["uvx", "tellmphone", "serve", "--i-am", "grok"])
+    assert "registered" in result
+    assert log.read_text().strip() == (
+        "mcp add tellmphone -- uvx tellmphone serve --i-am grok"
+    )
+
+
 def test_register_replaces_existing(fake_bin, tmp_path):
     log, script = recording_cli(tmp_path, "codex", flaky=True)
     fake_bin("codex", script)
@@ -101,16 +112,21 @@ def test_register_replaces_existing(fake_bin, tmp_path):
 def test_install_command_hits_all_detected_agents(fake_bin, tmp_path, capsys):
     claude_log, claude_script = recording_cli(tmp_path, "claude")
     codex_log, codex_script = recording_cli(tmp_path, "codex")
+    grok_log, grok_script = recording_cli(tmp_path, "grok")
     fake_bin("claude", claude_script)
     fake_bin("codex", codex_script)
+    fake_bin("grok", grok_script)
 
     assert main(["install"]) == 0
     out = capsys.readouterr().out
-    assert "claude: registered" in out and "codex: registered" in out
+    assert "claude: registered" in out
+    assert "codex: registered" in out
+    assert "grok: registered" in out
 
     # each registration serves with that agent's own identity
     assert "--i-am claude" in claude_log.read_text()
     assert "--i-am codex" in codex_log.read_text()
+    assert "--i-am grok" in grok_log.read_text()
     # source checkout detected -> registered command runs via uv
     assert shlex.split(claude_log.read_text())[6] == "uv"
 

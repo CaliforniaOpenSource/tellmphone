@@ -31,6 +31,7 @@ from tellmphone.adapters.base import (
 )
 
 _SESSION_KEYS = ("session_id", "thread_id", "conversation_id")
+_ERROR_EVENT_TYPES = {"error", "turn.failed"}
 
 
 def _find_session_id(event: object) -> str | None:
@@ -50,6 +51,30 @@ def _find_session_id(event: object) -> str | None:
             if found:
                 return found
     return None
+
+
+def _codex_error_detail(stdout: str) -> str | None:
+    """Extract a useful failure from codex's JSON event stream."""
+    messages = []
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, dict) or event.get("type") not in _ERROR_EVENT_TYPES:
+            continue
+        error = event.get("error")
+        message = event.get("message")
+        if isinstance(error, dict):
+            message = error.get("message") or message
+        elif isinstance(error, str):
+            message = error
+        if isinstance(message, str) and message.strip():
+            messages.append(message.strip())
+    return messages[-1] if messages else None
 
 
 class CodexAdapter(AgentAdapter):
@@ -161,7 +186,11 @@ class CodexAdapter(AgentAdapter):
                 text=True,
             )
             if proc.returncode != 0:
-                detail = (proc.stderr.strip() or proc.stdout.strip())[:500]
+                detail = (
+                    _codex_error_detail(proc.stdout)
+                    or proc.stderr.strip()
+                    or proc.stdout.strip()
+                )[:500]
                 raise AdapterError(f"codex exited {proc.returncode}: {detail}")
 
             session_id = None

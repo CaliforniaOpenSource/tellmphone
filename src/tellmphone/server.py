@@ -1,4 +1,4 @@
-"""The MCP server: five tools wired to the switchboard.
+"""The MCP server: tools wired to the switchboard.
 
 Tool docstrings are written for the calling LLM — they are the only manual
 it gets.
@@ -54,13 +54,11 @@ def create_server(config: Config) -> FastMCP:
         the same model; omit it for the callee's default. Don't guess model
         names: omit unless you know a valid one for that agent.
 
-        mode='wait' (default) blocks until the callee answers and returns the
-        response inline; if it takes too long you get status='ringing' and the
-        answer lands in the project mailbox if this server process survives
-        long enough for the callee to finish (poll check_messages). Live calls
-        take minutes and burn real tokens — one thoughtful call beats three
-        lazy ones. mode='voicemail' just leaves the message for the next time
-        that agent is active in the project; nothing runs now.
+        mode='wait' (default) starts the callee and returns status='ringing';
+        poll check_messages for the answer. Live calls take minutes and burn
+        real tokens — one thoughtful call beats three lazy ones.
+        mode='voicemail' just leaves the message for the next time that agent
+        is active in the project; nothing runs now.
 
         write=True lets the callee edit files in `project_dir` for the whole
         call — use it when you're deliberately delegating changes, not just
@@ -92,15 +90,24 @@ def create_server(config: Config) -> FastMCP:
         """
         return switchboard.reply(call_id=call_id, message=message, timeout_s=timeout_s)
 
+    @mcp.tool(title="Report progress on your current call")
+    def report_progress(message: str, call_id: str | None = None) -> dict:
+        """Compatibility stub.
+
+        Progress reporting is not part of the async-turn MVP. Finish the turn
+        with a final answer instead; callers poll check_messages.
+        """
+        return switchboard.report_progress(message=message, call_id=call_id)
+
     @mcp.tool(title="Check messages from other agents")
     def check_messages(project_dir: str) -> dict:
         """Check for messages from other agents in a project ("anything for me?").
 
-        Returns unread messages (voicemails and replies addressed to you),
-        including their full body, and all open calls you're a party to.
-        Worth doing when you start working in a project. Fetching marks
-        messages as read, so relay anything important to your human before
-        moving on. Reply with reply(call_id).
+        Returns unread messages addressed to you, including their full body,
+        and all open calls you're a party to. status='ringing' means a turn
+        is still running; kind='message' with is_final=true is an answer.
+        Fetching marks messages as read, so relay anything important to your
+        human before moving on. Reply with reply(call_id).
         """
         return switchboard.check_messages(project_dir=project_dir)
 

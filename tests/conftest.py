@@ -63,8 +63,18 @@ def boards(home, store, fake_adapter):
     """Two switchboards over the same store: 'claude' (caller) and 'fake' (callee)."""
     adapters = {"fake": fake_adapter, "claude": FakeAdapter()}
     adapters["claude"].name = "claude"
-    caller = Switchboard(Config(i_am="claude", home=home, timeout_s=30), store, adapters)
-    callee = Switchboard(Config(i_am="fake", home=home, timeout_s=30), store, adapters)
+    caller = Switchboard(
+        Config(i_am="claude", home=home, timeout_s=30),
+        store,
+        adapters,
+        detach_turns=False,
+    )
+    callee = Switchboard(
+        Config(i_am="fake", home=home, timeout_s=30),
+        store,
+        adapters,
+        detach_turns=False,
+    )
     return caller, callee
 
 

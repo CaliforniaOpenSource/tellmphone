@@ -61,8 +61,8 @@ class ClaudeAdapter(AgentAdapter):
         flags = []
         if req.model:
             flags += ["--model", req.model]
-        if req.write_access:
-            flags += ["--permission-mode", "acceptEdits"]
+        mode = "acceptEdits" if req.write_access else "dontAsk"
+        flags += ["--permission-mode", mode]
         return flags
 
     def _run(self, cmd: list[str], req: SpawnRequest, resuming: bool = False) -> AgentTurn:

@@ -1,13 +1,15 @@
 """Adapters exercised against fake claude/codex executables on PATH."""
 
 import json
+import uuid
 
 import pytest
 
-from tellmphone.adapters.base import SessionLost, SpawnRequest, scrubbed_env
+from tellmphone.adapters.base import AdapterError, SessionLost, SpawnRequest, scrubbed_env
 from tellmphone.adapters.claude import ClaudeAdapter
 from tellmphone.adapters.codex import CodexAdapter
 from tellmphone.adapters.gemini import GeminiAdapter
+from tellmphone.adapters.grok import GrokAdapter
 from tellmphone.personalities import Personality
 
 FAKE_CLAUDE = '''#!/usr/bin/env python3
@@ -26,9 +28,10 @@ if resume_id == "lost-session":
 prompt = flag("-p") or ""
 system = flag("--append-system-prompt") or ""
 model = flag("--model") or ""
+permission_mode = flag("--permission-mode") or ""
 print(json.dumps({
     "session_id": resume_id or "claude-sess-1",
-    "result": f"prompt={prompt}|system={system}|model={model}|cwd={os.getcwd()}",
+    "result": f"prompt={prompt}|system={system}|model={model}|permission={permission_mode}|cwd={os.getcwd()}",
     "is_error": False,
     "total_cost_usd": 0.01,
     "num_turns": 1,
@@ -57,6 +60,11 @@ def flag(name):
 prompt = args[-1]
 out_file = flag("--output-last-message")
 model = flag("--model") or ""
+if prompt == "json-error":
+    sys.stderr.write("Reading additional input from stdin...\\n")
+    print(json.dumps({"type": "error", "message": "Missing environment variable: AMD_LLM_API_KEY."}))
+    print(json.dumps({"type": "turn.failed", "error": {"message": "Missing environment variable: AMD_LLM_API_KEY."}}))
+    sys.exit(1)
 print("some non-json preamble")
 print(json.dumps({"type": "session_configured", "session_id": session_id}))
 print(json.dumps({"type": "item.completed", "item": {"type": "agent_message"}}))
@@ -86,7 +94,34 @@ print(json.dumps({
     "prompt": print_prompt(),
     "model": flag("--model") or "",
     "sandbox": "--sandbox" in args,
-    "skip_permissions": "--dangerously-skip-permissions" in args,
+    "mode": flag("--mode") or "",
+}))
+'''
+
+FAKE_GROK = '''#!/usr/bin/env python3
+import json, os, sys
+
+args = sys.argv[1:]
+
+def flag(name):
+    return args[args.index(name) + 1] if name in args else None
+
+session_id = flag("--session-id") or flag("--resume")
+if session_id == "lost-session":
+    sys.stderr.write("session not found: lost-session\\n")
+    sys.exit(1)
+
+print("some non-json preamble")
+print(json.dumps({
+    "session_id": session_id,
+    "response": json.dumps({
+        "argv": args,
+        "cwd": os.getcwd(),
+        "prompt": flag("-p") or "",
+        "model": flag("--model") or "",
+        "sandbox": flag("--sandbox") or "",
+        "permission_mode": flag("--permission-mode") or "",
+    }),
 }))
 '''
 
@@ -135,6 +170,13 @@ class TestClaudeAdapter:
         req.personality = Personality(name="neutral", description="", body="")
         turn = ClaudeAdapter().spawn(req)
         assert "system=|" in turn.text  # no --append-system-prompt sent
+
+    def test_permission_mode(self, fake_bin, req):
+        fake_bin("claude", FAKE_CLAUDE)
+        adapter = ClaudeAdapter()
+        assert "permission=dontAsk" in adapter.spawn(req).text
+        req.write_access = True
+        assert "permission=acceptEdits" in adapter.spawn(req).text
 
     def test_model_flag(self, fake_bin, req):
         fake_bin("claude", FAKE_CLAUDE)
@@ -191,6 +233,17 @@ class TestCodexAdapter:
         with pytest.raises(SessionLost):
             adapter.resume("lost-session", "again", req)
 
+    def test_failure_prefers_json_error_over_stderr_banner(self, fake_bin, req):
+        fake_bin("codex", FAKE_CODEX)
+        req.message = "json-error"
+
+        with pytest.raises(AdapterError) as exc:
+            CodexAdapter().spawn(req)
+
+        message = str(exc.value)
+        assert "Missing environment variable: AMD_LLM_API_KEY." in message
+        assert "Reading additional input from stdin" not in message
+
 
 class TestGeminiAdapter:
     def test_spawn_uses_sandbox_and_prompt_last(self, fake_bin, req, project):
@@ -201,6 +254,8 @@ class TestGeminiAdapter:
             "--add-dir",
             project,
             "--sandbox",
+            "--mode",
+            "plan",
             "--print",
             "hello there",
         ]
@@ -208,7 +263,7 @@ class TestGeminiAdapter:
         assert data["cwd"] == project
         assert turn.session_id is None
 
-    def test_write_access_skips_interactive_permissions(self, fake_bin, req):
+    def test_write_access_accepts_edits_without_skipping_permissions(self, fake_bin, req):
         fake_bin("agy", FAKE_AGY)
         req.write_access = True
         data = json.loads(GeminiAdapter().spawn(req).text)
@@ -216,11 +271,12 @@ class TestGeminiAdapter:
             "--add-dir",
             req.project_dir,
             "--sandbox",
-            "--dangerously-skip-permissions",
+            "--mode",
+            "accept-edits",
             "--print",
             "hello there",
         ]
-        assert data["skip_permissions"] is True
+        assert data["mode"] == "accept-edits"
         assert data["sandbox"] is True
 
     def test_model_flag_stays_before_prompt(self, fake_bin, req):
@@ -233,6 +289,8 @@ class TestGeminiAdapter:
             "--add-dir",
             req.project_dir,
             "--sandbox",
+            "--mode",
+            "plan",
             "--print",
             "hello there",
         ]
@@ -262,6 +320,8 @@ class TestGeminiAdapter:
             "--add-dir",
             req.project_dir,
             "--sandbox",
+            "--mode",
+            "plan",
             "--print",
             "again",
         ]
@@ -272,3 +332,59 @@ class TestGeminiAdapter:
     def test_available(self, fake_bin):
         fake_bin("agy", FAKE_AGY)
         assert GeminiAdapter().available()
+
+
+class TestGrokAdapter:
+    def test_spawn_uses_read_only_headless_session(self, fake_bin, req, project):
+        fake_bin("grok", FAKE_GROK)
+        turn = GrokAdapter().spawn(req)
+        data = json.loads(turn.text)
+        assert uuid.UUID(turn.session_id)
+        assert data["prompt"] == "hello there"
+        assert data["cwd"] == project
+        assert data["sandbox"] == "read-only"
+        assert data["permission_mode"] == "dontAsk"
+        assert "--no-auto-update" in data["argv"]
+        assert "--no-alt-screen" in data["argv"]
+        assert "--session-id" in data["argv"]
+
+    def test_write_access_uses_workspace_and_accept_edits(self, fake_bin, req):
+        fake_bin("grok", FAKE_GROK)
+        req.write_access = True
+        data = json.loads(GrokAdapter().spawn(req).text)
+        assert data["sandbox"] == "workspace"
+        assert data["permission_mode"] == "acceptEdits"
+
+    def test_model_flag(self, fake_bin, req):
+        fake_bin("grok", FAKE_GROK)
+        req.model = "grok-build"
+        data = json.loads(GrokAdapter().spawn(req).text)
+        assert data["model"] == "grok-build"
+
+    def test_personality_becomes_preamble(self, fake_bin, req):
+        fake_bin("grok", FAKE_GROK)
+        req.personality = Personality(name="g", description="", body="Be grumpy.")
+        data = json.loads(GrokAdapter().spawn(req).text)
+        assert "Be grumpy." in data["prompt"]
+        assert data["prompt"].endswith("hello there")
+
+    def test_empty_body_personality_injects_nothing(self, fake_bin, req):
+        fake_bin("grok", FAKE_GROK)
+        req.personality = Personality(name="neutral", description="", body="")
+        data = json.loads(GrokAdapter().spawn(req).text)
+        assert data["prompt"] == "hello there"
+
+    def test_resume_preserves_session_and_session_lost(self, fake_bin, req):
+        fake_bin("grok", FAKE_GROK)
+        adapter = GrokAdapter()
+        turn = adapter.resume("grok-sess-9", "again", req)
+        data = json.loads(turn.text)
+        assert turn.session_id == "grok-sess-9"
+        assert data["prompt"] == "again"
+        assert data["argv"][-2:] == ["--resume", "grok-sess-9"]
+        with pytest.raises(SessionLost):
+            adapter.resume("lost-session", "again", req)
+
+    def test_available(self, fake_bin):
+        fake_bin("grok", FAKE_GROK)
+        assert GrokAdapter().available()
