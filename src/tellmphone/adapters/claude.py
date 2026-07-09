@@ -18,6 +18,7 @@ from tellmphone.adapters.base import (
 )
 
 _USAGE_KEYS = ("total_cost_usd", "duration_ms", "num_turns")
+_TELLMPHONE_TOOLS = f"mcp__{SERVER_NAME}__*"
 
 
 class ClaudeAdapter(AgentAdapter):
@@ -62,7 +63,12 @@ class ClaudeAdapter(AgentAdapter):
         if req.model:
             flags += ["--model", req.model]
         mode = "acceptEdits" if req.write_access else "dontAsk"
-        flags += ["--permission-mode", mode]
+        flags += [
+            "--permission-mode",
+            mode,
+            "--allowedTools",
+            _TELLMPHONE_TOOLS,
+        ]
         return flags
 
     def _run(self, cmd: list[str], req: SpawnRequest, resuming: bool = False) -> AgentTurn:

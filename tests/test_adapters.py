@@ -29,9 +29,10 @@ prompt = flag("-p") or ""
 system = flag("--append-system-prompt") or ""
 model = flag("--model") or ""
 permission_mode = flag("--permission-mode") or ""
+allowed_tools = flag("--allowedTools") or ""
 print(json.dumps({
     "session_id": resume_id or "claude-sess-1",
-    "result": f"prompt={prompt}|system={system}|model={model}|permission={permission_mode}|cwd={os.getcwd()}",
+    "result": f"prompt={prompt}|system={system}|model={model}|permission={permission_mode}|allowed={allowed_tools}|cwd={os.getcwd()}",
     "is_error": False,
     "total_cost_usd": 0.01,
     "num_turns": 1,
@@ -174,9 +175,18 @@ class TestClaudeAdapter:
     def test_permission_mode(self, fake_bin, req):
         fake_bin("claude", FAKE_CLAUDE)
         adapter = ClaudeAdapter()
-        assert "permission=dontAsk" in adapter.spawn(req).text
+        read_only = adapter.spawn(req).text
+        assert "permission=dontAsk" in read_only
+        assert "allowed=mcp__tellmphone__*" in read_only
         req.write_access = True
-        assert "permission=acceptEdits" in adapter.spawn(req).text
+        writable = adapter.spawn(req).text
+        assert "permission=acceptEdits" in writable
+        assert "allowed=mcp__tellmphone__*" in writable
+
+    def test_resume_keeps_tellmphone_tools_allowed(self, fake_bin, req):
+        fake_bin("claude", FAKE_CLAUDE)
+        turn = ClaudeAdapter().resume("claude-sess-1", "again", req)
+        assert "allowed=mcp__tellmphone__*" in turn.text
 
     def test_model_flag(self, fake_bin, req):
         fake_bin("claude", FAKE_CLAUDE)

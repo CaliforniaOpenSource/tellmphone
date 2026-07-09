@@ -151,6 +151,10 @@ enabled only by a standing project grant in `config.toml` or `write=true` on a
 top-level call. A callee cannot extend write permission to another agent lower
 in the chain. The grant is pinned for the lifetime of the call.
 
+Headless Claude sessions explicitly pre-approve `mcp__tellmphone__*` so they can
+report progress and use the switchboard under `dontAsk`; other tools still
+follow the selected restrictive permission mode.
+
 Agent output is untrusted model-generated content. Callers should relay and
 evaluate it rather than blindly execute its instructions.
 
