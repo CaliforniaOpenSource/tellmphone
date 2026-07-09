@@ -1,8 +1,10 @@
+import stat
 import threading
 
 import pytest
 
 from tellmphone.store import (
+    CALL_ID_RE,
     CallBusy,
     CallNotFound,
     CallRecord,
@@ -14,7 +16,7 @@ from tellmphone.store import (
 )
 
 
-def make_record(project, call_id="call-t3st"):
+def make_record(project, call_id="call-1a2b3c4d"):
     return CallRecord(
         call_id=call_id,
         project_dir=project,
@@ -29,7 +31,7 @@ def make_record(project, call_id="call-t3st"):
 def test_call_roundtrip(store, project):
     record = make_record(project)
     store.create_call(record)
-    loaded = store.load_call("call-t3st")
+    loaded = store.load_call("call-1a2b3c4d")
     assert loaded.caller.agent == "claude"
     assert loaded.callee.agent == "codex"
     assert loaded.status == "ringing"
@@ -39,6 +41,12 @@ def test_load_unknown_call(store, project):
     store.project_box(project)
     with pytest.raises(CallNotFound):
         store.load_call("call-nope")
+
+
+def test_call_id_is_not_a_glob_pattern(store, project):
+    store.create_call(make_record(project))
+    with pytest.raises(CallNotFound):
+        store.load_call("*")
 
 
 def test_project_key_is_stable_and_distinct(tmp_path):
@@ -109,4 +117,19 @@ def test_lock_busy(store, project):
 
 def test_new_call_id_shape():
     cid = new_call_id()
-    assert cid.startswith("call-") and len(cid) == 13
+    assert CALL_ID_RE.fullmatch(cid)
+
+
+def test_call_files_are_user_only(store, project):
+    record = make_record(project)
+    call_dir = store.create_call(record)
+    store.append_transcript(
+        record.call_id,
+        TranscriptEntry(from_="claude", to="codex", body="secret", ts=utcnow()),
+    )
+
+    assert stat.S_IMODE(store.project_box(project).stat().st_mode) == 0o700
+    assert stat.S_IMODE(call_dir.stat().st_mode) == 0o700
+    assert stat.S_IMODE((call_dir / "call.json").stat().st_mode) == 0o600
+    assert stat.S_IMODE((call_dir / "call.lock").stat().st_mode) == 0o600
+    assert stat.S_IMODE((call_dir / "transcript.jsonl").stat().st_mode) == 0o600

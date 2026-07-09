@@ -1,5 +1,5 @@
 import os
-import time
+import threading
 
 import pytest
 
@@ -14,26 +14,36 @@ class FakeAdapter(AgentAdapter):
 
     name = "fake"
 
-    def __init__(self, delay: float = 0.0, lose_session: bool = False):
-        self.delay = delay
+    def __init__(self, lose_session: bool = False):
         self.lose_session = lose_session
         self.spawns: list[SpawnRequest] = []
         self.resumes: list[tuple[str, str]] = []
+        self.started = threading.Event()
+        self.release: threading.Event | None = None
 
     def available(self) -> bool:
         return True
 
+    def _start(self) -> None:
+        self.started.set()
+        if self.release is not None and not self.release.wait(timeout=2):
+            raise TimeoutError("test did not release fake adapter")
+
     def spawn(self, req: SpawnRequest) -> AgentTurn:
-        time.sleep(self.delay)
+        self._start()
         self.spawns.append(req)
-        return AgentTurn(f"fake-sess-{len(self.spawns)}", f"spawn-reply to: {req.message}")
+        return AgentTurn(
+            f"fake-sess-{len(self.spawns)}",
+            f"spawn-reply to: {req.message}",
+            usage={"turns": 1},
+        )
 
     def resume(self, session_id: str, message: str, req: SpawnRequest) -> AgentTurn:
         if self.lose_session:
             raise SessionLost("session evaporated")
-        time.sleep(self.delay)
+        self._start()
         self.resumes.append((session_id, message))
-        return AgentTurn(session_id, f"resume-reply to: {message}")
+        return AgentTurn(session_id, f"resume-reply to: {message}", usage={"turns": 1})
 
 
 @pytest.fixture

@@ -1,485 +1,208 @@
-# TeLLMphone — Design
+# TeLLMphone design
 
-Status: **implemented (v0.1)** — written before implementation, updated as
-built; §13 records what implementation taught us. `[verify]` markers on CLI
-details are resolved there.
+This document records the architectural rules that should remain true as the
+implementation changes. The README explains how to install and use the tool;
+the MCP tool docstrings are the caller-facing API reference.
 
-## 1. Goals
+## 1. Product boundary
 
-1. Let a coding agent (the **caller**) send a message to a coding agent
-   (the **callee**) for a given project directory, and get a response. Caller
-   and callee may be the same agent kind when the user wants a separate
-   headless session with a different personality or model.
-2. Keep a call **conversational**: follow-up messages go to the same callee
-   session, with full context, even if either side's session was interrupted,
-   compacted, or restarted in between.
-3. **Personalities**: callers pick a named, locally stored persona for the
-   callee instead of sending system prompts inline. The persona is applied
-   consistently for the lifetime of the call.
-4. **Answering machine**: an agent can ask "any messages for me in this
-   project?" and reply to them.
-5. Support **Claude Code and Codex** first; make adding other agents a
-   plugin, not a fork.
+TeLLMphone lets one local coding agent ask another local coding agent about a
+project. A call is point-to-point, threaded, and recoverable across agent
+restarts. The caller and callee may be different agent kinds or separate
+sessions of the same agent with a different model or personality.
 
-### Non-goals (v0.x)
+TeLLMphone is deliberately not:
 
-- No push notifications to a running agent mid-turn. Delivery is pull-based
-  (`check_messages`). Hooks-based nudges are a future idea (§12).
-- No remote/networked calls. Everything is one machine, one user.
-- No autonomous agent-to-agent loops without a human-owned session at the
-  root. Hop limits enforce this (§10).
-- Not a general message bus. It's a telephone: point-to-point, threaded.
+- a daemon or general message bus;
+- a remote service;
+- an autonomous agent loop;
+- a conference-call or workflow engine;
+- a push-notification system.
 
-## 2. Glossary (the telephone metaphor, precisely)
+Delivery is pull-based. Agents use `check_messages`; humans can use the CLI.
 
-| Term | Meaning |
-|---|---|
-| **Agent** | A CLI coding assistant TeLLMphone can drive headlessly (Claude Code, Codex). |
-| **Adapter** | The Python class that knows how to spawn/resume one agent kind. |
-| **Call** | A threaded conversation between a caller and a callee, scoped to a project directory. Has a stable `call_id`. |
-| **Switchboard** | The on-disk state store (`~/.tellmphone/`) plus the logic that routes messages to adapters. Not a daemon. |
-| **Personality** | A named, saved system-prompt package applied to the callee for the duration of a call. |
-| **Voicemail** | A message delivered into the mailbox instead of answered live — either because the caller chose async, or because a live call timed out. |
-| **Phonebook** | The registry of available adapters and personalities. |
-| **Hop count** | How many agent-to-agent links deep a call chain is. Bounded. |
+## 2. Terms
 
-## 3. Architecture
+- **Call:** one conversation with a stable `call_id`.
+- **Agent:** a supported coding CLI such as Claude Code, Codex, Gemini, or Grok.
+- **Adapter:** subprocess integration for one agent CLI.
+- **Switchboard:** lifecycle logic plus the filesystem store.
+- **Voicemail:** a queued message that does not start a headless callee.
+- **Personality:** a named, saved prompt applied to the callee.
+- **Hop count:** the depth of an agent-to-agent call chain.
 
-### 3.1 Process model: no daemon, shared disk state
+## 3. Process and identity model
 
-Each agent process runs its **own instance** of the TeLLMphone MCP server over
-stdio (this is how both Claude Code and Codex launch MCP servers). Instances
-coordinate exclusively through the filesystem under `~/.tellmphone/`, guarded
-by per-call file locks.
+Each host agent starts its own TeLLMphone MCP server over stdio. Instances share
+state under `~/.tellmphone/`; there is no long-running TeLLMphone process.
 
-Rejected alternative — a single long-lived HTTP/SSE daemon both agents connect
-to. It would make cross-instance coordination trivial, but adds lifecycle
-management (who starts it, when does it die, stale-port recovery) that is
-miserable for a local tool. Disk state + locks is enough at "a handful of
-calls per day" volume. If contention ever becomes real, the storage layer is
-isolated enough to swap in SQLite (§13).
+A live call works as follows:
 
-### 3.2 How a call executes
+1. The caller records the call and first transcript entry.
+2. TeLLMphone starts one detached `tellmphone turn <call_id>` process and
+   returns `ringing` immediately.
+3. The turn process acquires `turn.lock`, runs one adapter turn, writes the
+   answer or failure to disk, and exits.
+4. The caller observes progress and the final answer through `check_messages`
+   or retrieves the call directly with `get_call`.
 
-Placing a call does **not** talk to a running agent. The caller's TeLLMphone
-instance spawns the callee's CLI **headlessly as a subprocess**:
+The terminal CLI may wait by polling the same call record. It does not use a
+separate execution path.
 
-- Codex callee: `codex exec` with the project as working directory `[verify: --cd / -C flag]`,
-  JSON output mode to capture the session id `[verify: --json event stream and/or --output-last-message]`.
-- Claude callee: `claude -p <msg> --output-format json`, which returns
-  `session_id` and `result` `[verify]`.
+A mailbox address is `(canonical project path, agent kind)`. Multiple sessions
+of the same agent therefore share unread state. `get_call(call_id)` is the
+durable recovery path if another session consumes a notification.
 
-Follow-ups resume the callee's native session:
+Transcript entries also store `caller`/`callee` endpoint roles. Roles are
+required because agent names alone cannot distinguish a self-call.
 
-- Codex: `codex exec resume <session_id> <msg>` `[verify]`
-- Claude: `claude -p <msg> --resume <session_id>` `[verify]`
+## 4. Storage
 
-This is the crux of "session matching": **TeLLMphone owns a stable `call_id`
-and stores each side's volatile native session ids under it.** Callers never
-handle native session ids; adapters never see call ids.
-
-### 3.3 Who is "me"? Identity for the mailbox
-
-A mailbox address is the pair **(project directory, agent kind)** — e.g.
-"claude at ~/ws/foo". When Claude runs `check_messages` in a project, it asks
-for messages addressed to `claude` there. The MCP server knows which agent
-kind it's mounted in via server configuration (the `claude mcp add` entry
-passes `--i-am claude`; the Codex config passes `--i-am codex`). Project
-directory is passed per-call by the calling model (it knows its cwd; MCP
-servers can't reliably infer the client's cwd `[verify: whether client roots
-are exposed]`).
-
-## 4. Storage layout
-
-```
+```text
 ~/.tellmphone/
-├── config.toml                  # global settings: timeouts, hop limit, permissions
-├── personalities/
-│   ├── grumpy-reviewer.md       # frontmatter + prompt body (§7)
-│   └── security-auditor.md
-└── projects/
-    └── <slug>-<sha1[:12] of canonical path>/     # e.g. tellmphone-a1b2c3d4e5f6
-        ├── project.json         # canonical path (for reverse lookup)
-        └── calls/
-            └── <call_id>/
-                ├── call.json    # metadata: parties, sessions, personality, status
-                ├── call.lock    # advisory lock during spawn/resume/append
-                └── transcript.jsonl
+├── config.toml
+├── personalities/*.md
+└── projects/<slug>-<path-hash>/
+    ├── project.json
+    └── calls/<call_id>/
+        ├── call.json
+        ├── call.lock
+        ├── turn.lock
+        ├── transcript.jsonl
+        ├── turn.stdout
+        └── turn.stderr
 ```
 
-Decisions baked in here:
+State is outside the project repository so transcripts cannot be committed by
+accident. Project keys use the canonical path, allowing restarted sessions to
+find the same mailbox.
 
-- **Central state, not in-repo.** No `.tellmphone/` inside projects: nothing
-  to gitignore, no risk of committing transcripts, works for non-repo dirs.
-  Keyed by canonicalized (realpath) project path so `check_messages` from any
-  session of any agent finds the same box.
-- **JSON files, not a database.** Human-inspectable, trivially debuggable,
-  no migration story needed pre-1.0. One lock file per call serializes the
-  only real race (two processes appending to one call).
-- `call_id` is a short human-friendly id (e.g. `call-7f3k9q2m`), because the
-  calling LLM will read and re-type it.
+`call.json` contains the parties, native callee session id, model, personality
+snapshot, permissions, hop count, timestamps, delivery cursors, and status.
+Valid statuses are:
 
-### 4.1 `call.json`
+- `ringing`: a detached turn is in flight;
+- `answered`: the latest answer has landed;
+- `voicemail`: queued for a manual callee;
+- `closed`: logically hung up;
+- `failed`: the turn ended with an error.
 
-```json
-{
-  "call_id": "call-7f3k9q2m",
-  "project_dir": "/Users/kdewald/ws/foo",
-  "caller": {"agent": "claude"},
-  "callee": {
-    "agent": "codex",
-    "session_id": "0197c-...",        // native id, owned by the adapter
-    "personality": "grumpy-reviewer",
-    "personality_hash": "sha256:ab12…",
-    "personality_body": "You are a grumpy…" // snapshot so edits don't mutate live calls
-  },
-  "status": "answered",               // ringing | answered | voicemail | closed | failed
-  "hop_count": 1,
-  "created_at": "2026-07-02T18:04:11Z",
-  "last_activity_at": "2026-07-02T18:09:42Z",
-  "unread_for": ["claude"]            // who has messages they haven't fetched
-}
-```
+`transcript.jsonl` is the durable conversation. Each entry contains a sequence
+number, agent names, endpoint roles, body, timestamp, kind (`message`,
+`progress`, or `system`), and optional usage metadata.
 
-### 4.2 `transcript.jsonl`
+Lock responsibilities are separate:
 
-One JSON object per message: `{seq, from, to, body, ts, read}`. The transcript
-is the durable record; `unread_for` in `call.json` is the cheap index that
-lets `check_messages` scan a project without opening every transcript.
+- `call.lock` protects short metadata updates;
+- `turn.lock` permits only one adapter turn per call;
+- the transcript file lock makes sequence assignment and append atomic.
 
-## 5. The MCP tool surface
+Never hold `call.lock` while an agent CLI is running.
 
-Five tools. Deliberately few — every tool is context the calling model pays
-for on every turn.
+## 5. Call lifecycle and tools
 
-### 5.1 `call`
+`call` validates the project, hop limit, callee, personality, and write grant.
+It snapshots the resolved model and personality for the lifetime of the call.
 
-```
-call(
-  callee: str,              # "codex" | "claude" | any registered adapter
-  message: str,             # the actual ask
-  project_dir: str,         # absolute path; callee runs here
-  personality: str = None,  # name from the phonebook; adapter default otherwise
-  model: str = None,        # which model the callee runs; see below
-  context: str = None,      # optional extra background, kept separate from the ask
-  mode: "wait" | "voicemail" = "wait",
-  timeout_s: int = None,    # default from config (suggest 300)
-)
-→ {call_id, status, response?}
-```
+- `mode="wait"` starts a detached turn and returns `ringing`.
+- `mode="voicemail"` records the message for a future manual callee.
 
-- `mode="wait"`: spawn the callee, block, return its answer inline. If
-  `timeout_s` elapses, the tool returns `status="ringing"` with the call id
-  and a note to check back; the worker keeps running in the current server
-  process and, if that process survives, the answer lands in the mailbox when
-  the callee finishes. This best-effort fallback keeps ordinary slow answers
-  from being lost, but it is not a durable job runner.
-- `mode="voicemail"`: enqueue only. The callee is *not* spawned; the message
-  waits until some session of the callee agent in that project runs
-  `check_messages` and chooses to answer. (Human-in-the-loop async.)
-- `context` vs `message`: adapters frame them distinctly ("Background: … /
-  Your task: …") so callees don't chase the background as the ask.
-- `model` is deliberately **orthogonal to personality**: a personality says how
-  the callee behaves, the model says which brain runs it, and any combination
-  is valid. Resolution order: explicit `model` argument → `[agents.<name>]
-  model` default in config.toml → the CLI's own default. The resolved model is
-  **pinned in `call.json` for the lifetime of the call** — every resume and
-  transcript-replay uses it, so a conversation never silently switches brains
-  mid-thread. Names are passed through unvalidated (`claude --model`,
-  `codex exec -m`); a bad name comes back as a `failed` status carrying the
-  CLI's error. Changing model mid-conversation means placing a new call.
+`reply` is direction-aware:
 
-### 5.2 `reply`
+- a caller reply starts another detached callee turn;
+- a manual callee reply writes the answer directly without spawning itself;
+- a reply while `ringing` returns `busy`.
 
-```
-reply(call_id: str, message: str, mode="wait", timeout_s=None)
-→ {call_id, status, response?}
-```
+Native callee sessions are resumed when possible. If a session is lost or an
+adapter exposes no stable session id, TeLLMphone starts a fresh session with a
+reconstructed transcript prompt and records `resumed_via="transcript-replay"`.
 
-Resumes the callee's stored native session. If the callee's session can't be
-resumed (deleted, CLI upgraded, etc.), the adapter falls back to spawning a
-fresh session **primed with the transcript so far**, records the new native
-session id, and flags `"resumed_via": "transcript-replay"` in the response so
-nobody is silently confused. The transcript makes calls durable even when
-native sessions aren't.
+`report_progress` is available only inside the active detached callee. The
+callee inherits `TELLMPHONE_CALL_ID`; an update appends a `progress` entry,
+marks the caller unread, and leaves the call `ringing`.
 
-### 5.3 `check_messages`
+`check_messages` returns unread entries and open calls for a project. Reading
+advances that agent's delivery cursor. `get_call` returns an authorized call's
+full transcript without changing unread state.
 
-```
-check_messages(project_dir: str) → {
-  unread: [{call_id, from, personality?, preview, body, ts}],
-  open_calls: [{call_id, with, status, last_activity_at}],
-}
-```
+`hang_up` is logical: it marks the call `closed` but does not kill an agent CLI.
+A late turn must re-read the record and must never reopen a closed call.
 
-Answers "anything for me here?" for the agent identity this server instance
-is mounted in (§3.3). Fetching marks messages read. This is also the recovery
-path: a brand-new session that knows nothing can rediscover every open thread
-in the project.
+`phonebook` reports installed adapters, availability, configured models, and
+personalities.
 
-### 5.4 `hang_up`
+If a detached turn cannot start or raises an unexpected exception, the call
+must become `failed` with `last_error`; it must not remain indefinitely
+`ringing` after the worker exits.
 
-`hang_up(call_id, reason?)` → marks the call `closed`. Transcript is retained.
-Replying to a closed call fails with a clear error suggesting a new `call`.
+## 6. Security and permissions
 
-### 5.5 `phonebook`
+This is a same-user local tool, not a security boundary against processes that
+can already read the user's home directory. It still enforces integrity at the
+tool layer:
 
-`phonebook()` → registered adapters (with availability: is the CLI actually
-installed?) and personalities (name + one-line description). Lets the caller
-discover what it can dial without any out-of-band knowledge.
+- call ids must match the generated format and are never treated as glob input;
+- MCP agents may retrieve or mutate only calls they participate in;
+- progress is bound to the active detached callee;
+- hop limits prevent unbounded agent-to-agent chains.
 
-## 6. Call lifecycle & session matching (the hard part)
+Callees run in the most restrictive supported mode by default. Write access is
+enabled only by a standing project grant in `config.toml` or `write=true` on a
+top-level call. A callee cannot extend write permission to another agent lower
+in the chain. The grant is pinned for the lifetime of the call.
 
-```
-caller (claude)                switchboard                    callee (codex)
-   │  call(codex, msg, dir)         │                              │
-   ├───────────────────────────────►│ create call-7f3k9q2m, lock   │
-   │                                ├── spawn: codex exec ────────►│
-   │                                │   … capture session_id …     │ runs in dir
-   │                                │◄── final message + id ───────┤
-   │◄── {call-7f3k9q2m, response} ──┤ store session_id, transcript │
-   │                                │                              │
-   │  (caller session dies, user restarts Claude tomorrow)         │
-   │                                │                              │
-   │  check_messages(dir)           │                              │
-   ├───────────────────────────────►│ scan project box             │
-   │◄── open_calls: [call-7f3k9q2m] ┤                              │
-   │  reply(call-7f3k9q2m, "but…")  │                              │
-   ├───────────────────────────────►├── codex exec resume <id> ───►│ same context
-```
+Agent output is untrusted model-generated content. Callers should relay and
+evaluate it rather than blindly execute its instructions.
 
-Invariants:
-
-1. **`call_id` is the only cross-session key.** It appears in every tool
-   result and in `check_messages`, so no side ever needs to persist anything
-   in its own context to recover a thread.
-2. **Native session ids are adapter-private.** They're stored in `call.json`
-   and never surfaced to models — they're volatile and agent-specific.
-3. **Caller-side interruption costs nothing** (the caller is stateless w.r.t.
-   TeLLMphone). **Callee-side session loss degrades gracefully** via
-   transcript replay (§5.2).
-4. **One writer per call.** The per-call lock serializes spawn/resume/append;
-   a `reply` while the callee is still running returns `status="busy"`
-   ("the line is engaged") rather than forking the conversation.
+Call metadata and transcripts are written with user-only permissions. They may
+contain source code or secrets that entered the conversation; users can remove
+closed or failed calls with `tellmphone gc` or delete the TeLLMphone home.
 
 ## 7. Personalities
 
-A personality is a Markdown file. Builtins ship inside the package
-(`tellmphone/data/personalities/`) and are read from there at runtime —
-never copied to disk — so package upgrades reach every install. User
-personalities live in `~/.tellmphone/personalities/` and overlay the
-builtins: a user file whose `name` matches a builtin replaces it, and one
-with `disabled: true` in the frontmatter hides the name entirely.
+Built-in personalities ship as Markdown package data. User personalities live
+under `~/.tellmphone/personalities/` and override built-ins by name; a user file
+with `disabled: true` hides that personality.
 
-```markdown
----
-name: grumpy-reviewer
-description: Hostile-but-fair senior reviewer. Hunts for real bugs, hates nits.
-agents: [claude, codex]        # optional allowlist; default any
----
-You are a grumpy but rigorous senior engineer reviewing a colleague's work…
-```
+The switchboard resolves a personality by name, checks its optional agent
+allowlist, and stores a body/hash snapshot on the call. Editing the source file
+cannot change an in-flight conversation. Adapters inject the snapshot only on
+the first native session or a transcript-replay spawn.
 
-Rules:
+There is no MCP tool for writing personalities. They are human-managed input.
 
-- **Selected by name, injected by the switchboard.** The caller sends
-  `personality="grumpy-reviewer"`; the callee-side injection mechanism is the
-  adapter's business: Claude gets `--append-system-prompt` `[verify]`; Codex
-  has no clean system-prompt flag in exec mode `[verify]`, so its adapter
-  prepends a clearly framed preamble to the first message.
-- **Snapshot at call time.** `call.json` records the personality's content
-  hash and body. Editing a personality file never changes the behavior of an
-  in-flight call — a resumed session already has the old prompt in its
-  context, and transcript replay re-injects the stored body.
-- **First message only.** Personalities are injected once at spawn; resumes
-  rely on the callee's own session memory. (Transcript-replay fallback
-  re-injects from the snapshot stored in `call.json`.)
-- Personalities are user-managed files (create/edit with any editor). The
-  `tellmphone personalities` CLI listing shows each entry's layer
-  (`[builtin]`/`[user]`). No MCP tool for *writing* personalities in v0 —
-  that's a human curation job, and letting agents author each other's system
-  prompts is a footgun.
+## 8. Adapters
 
-## 8. Adapter interface
+An adapter is a small subprocess wrapper. It owns:
 
-```python
-class AgentAdapter(ABC):
-    name: str                      # "claude", "codex"
+- CLI availability detection;
+- MCP registration and removal where supported;
+- argv, cwd, sandbox, and environment construction;
+- first-turn spawn and native-session resume;
+- output, session-id, error, and usage parsing.
 
-    @abstractmethod
-    def available(self) -> bool: ...          # CLI installed & sane version?
+Adapters return `AgentTurn` and raise `AdapterError` for ordinary failures or
+`SessionLost` when replay should replace resume. They do not manage call state,
+mailboxes, locking, or personalities beyond CLI-specific prompt injection.
 
-    @abstractmethod
-    def spawn(self, req: SpawnRequest) -> AgentTurn: ...
-        # first message; returns (native_session_id, response_text, usage?)
+Child environments carry the hop count and opaque call id. Host-session markers
+that would falsely make a child look nested are scrubbed, while credentials and
+provider configuration are preserved.
 
-    @abstractmethod
-    def resume(self, session_id: str, message: str,
-               req: TurnRequest) -> AgentTurn: ...
-        # raises SessionLost -> switchboard does transcript replay via spawn()
+Built-in adapters are loaded first. Third-party adapters use the
+`tellmphone.adapters` entry-point group and may override an adapter by name.
 
-    def default_permissions(self) -> Permissions: ...   # §10
-```
+## 9. Change checklist
 
-- Adapters are **subprocess wranglers, nothing more**: build argv, set cwd,
-  parse output, extract session id. All threading/state/personality logic
-  lives in the switchboard so adapters stay ~100 lines.
-- Third-party adapters register via the `tellmphone.adapters` entry-point
-  group; `phonebook()` reflects whatever is installed. Gemini CLI, opencode,
-  etc. become `pip install tellmphone-gemini`, no core changes.
+Changes to the lifecycle should preserve these invariants:
 
-## 9. Client setup
-
-`tellmphone install` registers the server with every detected agent CLI;
-`tellmphone uninstall` reverses it. Registration lives on the adapter
-(`AgentAdapter.register_mcp`), because plugging into an agent is per-agent
-knowledge just like spawning it — a third-party adapter brings its own.
-
-- **claude**: `claude mcp add tellmphone --scope user -- <serve-cmd>`.
-- **codex**: `codex mcp add tellmphone -- <serve-cmd>`, then patches
-  `default_tools_approval_mode = "approve"` into the server's table in
-  `config.toml` — without it, codex's non-interactive exec mode auto-rejects
-  every MCP tool call as "user cancelled" (the value `"auto"` does NOT mean
-  auto-approve; empirically only `"approve"` pre-approves tools).
-
-The serve command is resolved automatically: a source checkout registers
-`uv run --project <root> tellmphone serve --i-am <agent>`; an installed
-package registers the `tellmphone` executable; `--serve-command` overrides.
-
-Optional companion packages, generated by `tellmphone install-etiquette`:
-
-- A **Claude skill** (`~/.claude/skills/tellmphone/SKILL.md`): when a second
-  opinion is worth it, how to phrase asks, check messages when starting work
-  in a project, always relay the callee's answer to the human.
-- An **`AGENTS.md` snippet** for Codex with the same guidance.
-
-These are instructions, not machinery — the MCP server works without them,
-but they make agents *use* the phone well.
-
-## 10. Security & safety model
-
-- **Callee permissions never extend down a chain.** Calls default to the most
-  restricted headless mode available because the common case is review,
-  design, or debugging advice, not edits (Claude: default `-p` permission
-  mode, no `--dangerously-skip-permissions`; Codex: default read-only sandbox
-  `[verify]`). A direct caller can deliberately pass write access to the
-  callee in exactly two ways: a standing per-project entry in `config.toml`
-  that only the human edits, or a per-call `write=True` from a **top-level**
-  caller. This lets a trusted top-level agent delegate edits without making
-  every short-lived project a config chore. The switchboard refuses
-  `write=True` from any session with `hop_count > 0`: a callee receives the
-  caller's grant for that call, but it cannot extend that grant to another
-  agent down the chain. The grant is pinned on the call record for the life of
-  the call (replies and replay-spawns keep it; it can't be widened after the
-  fact).
-- **Hop limit.** Every spawned callee gets the TeLLMphone server too, so
-  Codex could call Claude could call Codex… `hop_count` travels in an env var
-  (`TELLMPHONE_HOP=1`) set on spawned subprocesses; at the configured max
-  (default **2**) the `call` tool refuses. This is the "no infinite game of
-  telephone" rule.
-- **Transcripts are untrusted content.** Callee output relayed to the caller
-  is another model's text, subject to prompt injection like any tool result.
-  The etiquette skill says so explicitly; the server wraps relayed messages
-  in a frame identifying them as quoted agent output.
-- **Cost visibility.** Every live call burns callee-side tokens on the
-  human's accounts. Tool results include duration and, where the CLI reports
-  it, token usage `[verify]`, so the human sees what a call cost.
-- Transcripts may contain code and secrets that flowed through prompts;
-  they're `0600` under the user's home dir, and `hang_up` + a
-  `tellmphone gc` command allow cleanup.
-
-## 11. Package shape
-
-```
-tellmphone/
-├── pyproject.toml            # uv-managed; deps: mcp (official SDK), pydantic
-├── src/tellmphone/
-│   ├── server.py             # FastMCP app: the 5 tools
-│   ├── switchboard.py        # call lifecycle, locking, mailbox
-│   ├── store.py              # ~/.tellmphone layout, JSON I/O, locks
-│   ├── personalities.py
-│   ├── adapters/
-│   │   ├── base.py           # AgentAdapter ABC + entry-point loading
-│   │   ├── claude.py
-│   │   └── codex.py
-│   └── cli.py                # serve | call | reply | messages | show | gc | personalities
-└── tests/                    # adapters tested against fake CLI scripts
-```
-
-Python ≥3.11. `uvx tellmphone serve` is the blessed run mode (no install step
-for users who have uv).
-
-## 12. Roadmap
-
-- **v0.1 — dial tone.** `call`/`reply`/`hang_up`/`phonebook`, wait mode only,
-  Claude + Codex adapters, personalities. Prove session matching round-trips.
-- **v0.2 — answering machine.** `check_messages`, voicemail mode, ringing→
-  mailbox timeout flow, unread tracking, etiquette skill + AGENTS.md.
-- **v0.3 — switchboard upgrades.** Entry-point adapter plugins documented for
-  third parties, token/cost reporting, transcript replay hardening.
-- **Later / maybe.** Conference calls (fan-out one ask to N callees, collect
-  answers); hooks-based new-message nudges so agents notice voicemail without
-  polling; SQLite backend if JSON+locks ever hurts; remote calls (explicitly
-  out of scope until there's a real user).
-
-## 13. Implementation notes (v0.1, 2026-07-02)
-
-Learned while building; the sections above remain the intent.
-
-- **Nested-Claude guard.** Claude Code refuses to start when it detects it is
-  running inside another Claude Code process (via `CLAUDECODE` /
-  `CLAUDE_CODE_CHILD_SESSION` and related session-id environment variables).
-  Adapters therefore scrub only those host session markers from every callee
-  subprocess environment (`AgentAdapter.child_env`). Other `CLAUDE_CODE_*`
-  variables can carry auth, provider, or gateway config and must pass through.
-  The markers describe the host, not the child, so removing them is correcting
-  a lie, not evading a safety check we care about; TeLLMphone's own hop limit
-  (`TELLMPHONE_HOP`, set in the same place) is what prevents runaway nesting.
-- **`reply` is direction-aware.** When the *caller* replies, the callee is
-  driven headlessly (resume/spawn). When the *callee* replies — answering a
-  voicemail from its own live session — no subprocess runs at all: the answer
-  is appended to the transcript and flagged unread for the caller. Same tool,
-  two mechanics; §5.2's description covers only the first, this note is the
-  spec for the second.
-- **Voicemail → live conversion.** A caller replying on a call whose callee
-  has no native session yet (voicemail never spawned one) gets a fresh spawn
-  primed via transcript replay — the same path as lost-session recovery.
-- **Codex adapter live-verified** (codex-cli 0.142.5, 2026-07-02): real
-  `codex exec` call in a project dir, session id captured from the `--json`
-  stream (`session_configured` event), follow-up via native
-  `codex exec resume <id>` with correct context carry-over, and `-m/--model`
-  pass-through (invalid names surface the API error as `failed`, as
-  designed). Two flag facts learned: `--cd` and `--sandbox` are **spawn-only**
-  — `exec resume` rejects them and inherits both from the original session —
-  and codex treats a piped stdin as extra prompt input.
-- **Callee subprocesses get `stdin=/dev/null`.** In server mode our stdin is
-  the MCP JSON-RPC transport; a callee inheriting it could consume protocol
-  bytes meant for the host (and codex would happily read it as prompt).
-- **Claude adapter live-verified** (claude CLI 2.1.42, 2026-07-02): real
-  `claude -p` call spawned from inside a Claude Code session (env scrub
-  working as designed), with `--append-system-prompt` (personality),
-  `--model` pinning, session id captured from the JSON result, native
-  `--resume` follow-up with correct context carry-over, and cost/usage
-  reported back. Gotcha for troubleshooting: claude reports many failures as
-  JSON on **stdout** with an empty stderr (e.g. a stale CLI OAuth token →
-  `is_error: true` + 401), so adapter errors must include stdout.
-- **Callee sandboxes constrain tooling, not just the repo.** Codex's
-  workspace-write sandbox blocked `uv`'s cache under `~/.cache/uv`; the fix
-  (relayed over a live `reply`, which codex applied) was `UV_CACHE_DIR=$TMPDIR/…`.
-  Expect callees to occasionally need this kind of nudge — a good example for
-  the etiquette skill.
-
-## 14. Open questions
-
-1. **Codex session-id capture**: exactly which `codex exec` output mode
-   yields the session id most robustly (JSONL event vs. session file under
-   `~/.codex/sessions`)? Decide during adapter spike.
-2. **Client roots**: can the server learn the client's cwd via MCP `roots`
-   instead of requiring `project_dir` on every tool call? Would remove the
-   most error-prone argument.
-3. **Voicemail discovery**: is pull-only good enough in practice, or do users
-   forget mailboxes exist? (A `SessionStart` hook that runs `check_messages`
-   might graduate from v-later fast.)
-4. **Live call ownership**: when a wait-mode call outlives the MCP tool call,
-   how do we persist partial output if the *caller's* process dies too? Needs
-   a small "in-flight" state + reconcile pass on server start.
+1. The filesystem is the source of truth; caller process lifetime is irrelevant.
+2. A call has at most one running adapter turn.
+3. Locks are held only for short filesystem operations.
+4. Transcript sequence numbers are unique and ordered.
+5. Native session ids never become caller-facing conversation keys.
+6. Lost sessions degrade to transcript replay.
+7. Late answers never reopen closed calls.
+8. Worker failures always produce a terminal recorded state.
+9. Write permissions and hop counts never expand down a chain.
+10. Tool results from other agents remain untrusted input.

@@ -70,6 +70,8 @@ The tools the agents get:
 | `call` | Send a message to an agent about a project. Optional personality and model. Starts a live turn, or leaves it as voicemail. |
 | `reply` | Follow up on an existing call. The callee resumes with full context. |
 | `check_messages` | List unread messages and open calls for a project. |
+| `get_call` | Recover one call's metadata and full transcript without changing unread state. |
+| `report_progress` | Let an active callee send intermediate updates without finishing its turn. |
 | `hang_up` | Close a call. The transcript is kept. |
 | `phonebook` | List available agents and personalities. |
 
@@ -89,9 +91,10 @@ spawns one detached callee turn (`codex exec`, `claude -p`, `agy --print`,
 turn finishes, its answer lands in the caller's mailbox. Replies start another
 one-shot turn and resume the callee's native session where the CLI exposes
 one. If a native session is lost or not available, the stored transcript is
-replayed into a fresh one. Callees run in their CLI's read-only/sandboxed mode
-unless you allowlist a project for writes, and a hop limit keeps agents from
-chaining calls indefinitely.
+replayed into a fresh one. Long-running callees can leave intermediate progress
+updates in the caller's mailbox while the final turn continues. Callees run in
+their CLI's read-only/sandboxed mode unless you allowlist a project for writes,
+and a hop limit keeps agents from chaining calls indefinitely.
 
 The internals lean into the name: the switchboard routes calls, the
 phonebook lists who you can dial, a busy line means the callee is still
@@ -127,8 +130,8 @@ themselves callees can't grant write, so access never spreads down an
 agent-to-agent chain.
 
 Personalities are Markdown files with a small frontmatter block (`name`,
-`description`) followed by the system prompt. Twelve builtins ship with the
-package and update with it — critics (`grumpy-reviewer`, `security-auditor`,
+`description`) followed by the system prompt. Thirteen builtins ship with the
+package and update with it — a neutral baseline (`neutral`), critics (`grumpy-reviewer`, `security-auditor`,
 `sycophancy-cop`), thinking partners (`rubber-duck`, `devils-advocate`,
 `architect`, `the-algorithm`, `transaction-cost-accountant`), and builders
 (`debugger`, `test-engineer`, `evidence-engineer`, `tiny-hacker`); your own live in

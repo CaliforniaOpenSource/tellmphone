@@ -145,12 +145,27 @@ def test_install_single_agent(fake_bin, tmp_path, capsys):
 
 def test_uninstall(fake_bin, tmp_path, capsys):
     claude_log, claude_script = recording_cli(tmp_path, "claude")
-    _, codex_script = recording_cli(tmp_path, "codex")
+    codex_log, codex_script = recording_cli(tmp_path, "codex")
+    grok_log, grok_script = recording_cli(tmp_path, "grok")
     fake_bin("claude", claude_script)
     fake_bin("codex", codex_script)
+    fake_bin("grok", grok_script)
 
     assert main(["uninstall"]) == 0
     assert "mcp remove tellmphone --scope user" in claude_log.read_text()
+    assert "mcp remove tellmphone" in codex_log.read_text()
+    assert "mcp remove tellmphone" in grok_log.read_text()
+
+
+def test_install_reports_registration_failure(fake_bin, tmp_path, capsys):
+    _, script = recording_cli(tmp_path, "claude")
+    script += '\nsys.stderr.write("forced failure\\n")\nsys.exit(2)\n'
+    fake_bin("claude", script)
+
+    assert main(["install", "--agent", "claude"]) == 1
+    output = capsys.readouterr().out
+    assert "FAILED" in output
+    assert "forced failure" in output
 
 
 def test_serve_command_override(fake_bin, tmp_path, capsys):

@@ -72,7 +72,6 @@ class Switchboard:
         model: str | None = None,
         context: str | None = None,
         mode: str = "wait",
-        timeout_s: int | None = None,
         write: bool = False,
     ) -> dict:
         if mode not in ("wait", "voicemail"):
@@ -87,6 +86,7 @@ class Switchboard:
                 "reason": f"project_dir must be an existing directory: {project_dir}",
             }
         project_dir = str(project_path)
+        resolved_write = write or self.config.permissions_for(project_dir).write
 
         hop_count = self.config.hop_count + 1
         if hop_count > self.config.max_hops:
@@ -144,12 +144,19 @@ class Switchboard:
             ),
             status="voicemail" if mode == "voicemail" else "ringing",
             hop_count=hop_count,
-            write=write,
+            write=resolved_write,
             created_at=utcnow(),
             last_activity_at=utcnow(),
         )
         self.store.create_call(record)
-        self._append(record, self.config.i_am, callee, _frame_message(message, context))
+        self._append(
+            record,
+            self.config.i_am,
+            callee,
+            _frame_message(message, context),
+            from_role="caller",
+            to_role="callee",
+        )
 
         if mode == "voicemail":
             with self.store.call_lock(record.call_id):
@@ -179,7 +186,6 @@ class Switchboard:
         self,
         call_id: str,
         message: str,
-        timeout_s: int | None = None,
     ) -> dict:
         try:
             record = self.store.load_call(call_id)
@@ -213,7 +219,14 @@ class Switchboard:
             record = self.store.load_call(call_id)
             if status_error := self._reply_status_error(record):
                 return status_error
-            self._append(record, me, record.callee.agent, message)
+            self._append(
+                record,
+                me,
+                record.callee.agent,
+                message,
+                from_role="caller",
+                to_role="callee",
+            )
             record.status = "ringing"
             self.store.save_call(record)
 
@@ -229,7 +242,14 @@ class Switchboard:
             record = self.store.load_call(record.call_id)
             if status_error := self._reply_status_error(record):
                 return status_error
-            self._append(record, record.callee.agent, record.caller.agent, message)
+            self._append(
+                record,
+                record.callee.agent,
+                record.caller.agent,
+                message,
+                from_role="callee",
+                to_role="caller",
+            )
             record.status = "answered"
             if record.caller.agent not in record.unread_for:
                 record.unread_for.append(record.caller.agent)
@@ -274,6 +294,7 @@ class Switchboard:
                 continue
             with self.store.call_lock(record.call_id):
                 fresh = self.store.load_call(record.call_id)
+                my_role = self._role_for(fresh)
                 other = (
                     fresh.callee.agent
                     if me == fresh.caller.agent
@@ -287,7 +308,7 @@ class Switchboard:
                         e
                         for e in transcript
                         if (
-                            e.to == me
+                            self._entry_is_for(e, me, my_role)
                             and e.kind in ("message", "progress")
                             and e.seq > last_read
                         )
@@ -310,6 +331,7 @@ class Switchboard:
                     "body": entry.body,
                     "ts": entry.ts.isoformat(),
                     "is_final": entry.kind == "message",
+                    "usage": entry.usage,
                 }
                 for entry in incoming
             )
@@ -328,15 +350,84 @@ class Switchboard:
             "note": "use reply(call_id, message) to continue any of these",
         }
 
+    # ----------------------------------------------------------- call lookup
+
+    def get_call(self, call_id: str) -> dict:
+        """Return one call and its transcript without changing unread state."""
+        try:
+            record = self.store.load_call(call_id)
+        except CallNotFound:
+            return {"status": "error", "error": f"no call {call_id!r}"}
+        if self.config.i_am not in (record.caller.agent, record.callee.agent):
+            return {
+                "call_id": call_id,
+                "status": "error",
+                "error": f"call {call_id} is between {record.caller.agent} and "
+                f"{record.callee.agent}; you are {self.config.i_am}",
+            }
+        return {
+            "call_id": record.call_id,
+            "status": record.status,
+            "project_dir": record.project_dir,
+            "caller": record.caller.agent,
+            "callee": record.callee.agent,
+            "personality": record.callee.personality,
+            "model": record.callee.model,
+            "write": record.write,
+            "created_at": record.created_at.isoformat(),
+            "last_activity_at": record.last_activity_at.isoformat(),
+            "closed_reason": record.closed_reason,
+            "last_error": record.last_error,
+            "resumed_via": record.resumed_via,
+            "transcript": [
+                self._entry_dict(entry) for entry in self.store.read_transcript(call_id)
+            ],
+        }
+
     # ----------------------------------------------------------- progress
 
     def report_progress(self, message: str, call_id: str | None = None) -> dict:
         call_id = call_id or self.config.call_id
-        return {
-            "call_id": call_id,
-            "status": "refused",
-            "reason": "progress reporting is not supported in this async-turn version; poll check_messages for the final answer",
-        }
+        if not call_id or self.config.call_id != call_id:
+            return {
+                "call_id": call_id,
+                "status": "refused",
+                "reason": "progress can only be reported from the active detached call",
+            }
+        try:
+            with self.store.call_lock(call_id):
+                record = self.store.load_call(call_id)
+                if self.config.i_am != record.callee.agent:
+                    return {
+                        "call_id": call_id,
+                        "status": "refused",
+                        "reason": f"only the callee ({record.callee.agent}) can report progress",
+                    }
+                if record.status != "ringing":
+                    return {
+                        "call_id": call_id,
+                        "status": "refused",
+                        "reason": f"call is {record.status}, not ringing",
+                    }
+                entry = self._append(
+                    record,
+                    record.callee.agent,
+                    record.caller.agent,
+                    message,
+                    kind="progress",
+                    from_role="callee",
+                    to_role="caller",
+                )
+                if record.caller.agent not in record.unread_for:
+                    record.unread_for.append(record.caller.agent)
+                self.store.save_call(record)
+        except CallNotFound:
+            return {
+                "call_id": call_id,
+                "status": "error",
+                "error": f"no call {call_id!r}",
+            }
+        return {"call_id": call_id, "status": "reported", "seq": entry.seq}
 
     # -------------------------------------------------------------- hang up
 
@@ -347,6 +438,13 @@ class Switchboard:
             return {"status": "error", "error": f"no call {call_id!r}"}
         with self.store.call_lock(call_id):
             record = self.store.load_call(call_id)
+            if self.config.i_am not in (record.caller.agent, record.callee.agent):
+                return {
+                    "call_id": call_id,
+                    "status": "error",
+                    "error": f"call {call_id} is between {record.caller.agent} and "
+                    f"{record.callee.agent}; you are {self.config.i_am}",
+                }
             record.status = "closed"
             record.closed_reason = reason
             self._append(
@@ -355,6 +453,7 @@ class Switchboard:
                 "*",
                 f"hung up{': ' + reason if reason else ''}",
                 kind="system",
+                from_role="system",
             )
             self.store.save_call(record)
         return {"call_id": call_id, "status": "closed"}
@@ -387,8 +486,7 @@ class Switchboard:
             project_dir=record.project_dir,
             personality=persona,
             model=record.callee.model,
-            write_access=record.write
-            or self.config.permissions_for(record.project_dir).write,
+            write_access=record.write,
             hop_count=record.hop_count,
             call_id=record.call_id,
         )
@@ -408,12 +506,56 @@ class Switchboard:
         except PersonalityError:
             return None  # old call record without a body snapshot
 
-    def _append(self, record, from_, to, body, kind="message"):
+    def _role_for(self, record: CallRecord) -> str:
+        if record.caller.agent != record.callee.agent:
+            return "caller" if self.config.i_am == record.caller.agent else "callee"
+        return "callee" if self.config.call_id == record.call_id else "caller"
+
+    @staticmethod
+    def _entry_is_for(entry: TranscriptEntry, agent: str, role: str) -> bool:
+        if entry.to_role is not None:
+            return entry.to_role == role
+        return entry.to == agent
+
+    @staticmethod
+    def _entry_dict(entry: TranscriptEntry) -> dict:
+        return {
+            "seq": entry.seq,
+            "from": entry.from_,
+            "to": entry.to,
+            "from_role": entry.from_role,
+            "to_role": entry.to_role,
+            "body": entry.body,
+            "kind": entry.kind,
+            "ts": entry.ts.isoformat(),
+            "usage": entry.usage,
+        }
+
+    def _append(
+        self,
+        record,
+        from_,
+        to,
+        body,
+        kind="message",
+        from_role=None,
+        to_role=None,
+        usage=None,
+    ):
         # seq is assigned inside append_transcript, atomically under the
         # transcript's own lock — safe with or without call.lock held.
         return self.store.append_transcript(
             record.call_id,
-            TranscriptEntry(from_=from_, to=to, body=body, ts=utcnow(), kind=kind),
+            TranscriptEntry(
+                from_=from_,
+                to=to,
+                body=body,
+                ts=utcnow(),
+                kind=kind,
+                from_role=from_role,
+                to_role=to_role,
+                usage=usage or {},
+            ),
         )
 
     def _replay_prompt(self, record: CallRecord) -> str:
@@ -484,26 +626,32 @@ class Switchboard:
         except CallNotFound:
             return {"status": "error", "error": f"no call {call_id!r}"}
 
-        adapter = self.adapters.get(record.callee.agent)
-        if adapter is None or not adapter.available():
-            return self._fail_turn(call_id, f"{record.callee.agent} CLI is not available")
+        try:
+            adapter = self.adapters.get(record.callee.agent)
+            if adapter is None or not adapter.available():
+                return self._fail_turn(
+                    call_id, f"{record.callee.agent} CLI is not available"
+                )
 
-        turn_lock_path = self.store.call_dir(call_id) / "turn.lock"
-        with open(turn_lock_path, "w") as lock_fh:
-            try:
-                import fcntl
+            turn_lock_path = self.store.call_dir(call_id) / "turn.lock"
+            with open(turn_lock_path, "w") as lock_fh:
+                try:
+                    import fcntl
 
-                fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                return {"call_id": call_id, "status": "busy"}
-            try:
-                with self.store.call_lock(call_id):
-                    record = self.store.load_call(call_id)
-                    if record.status != "ringing":
-                        return {"call_id": call_id, "status": record.status}
-                return self._run_adapter_turn(record, adapter)
-            finally:
-                fcntl.flock(lock_fh, fcntl.LOCK_UN)
+                    fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    return {"call_id": call_id, "status": "busy"}
+                try:
+                    with self.store.call_lock(call_id):
+                        record = self.store.load_call(call_id)
+                        if record.status != "ringing":
+                            return {"call_id": call_id, "status": record.status}
+                    return self._run_adapter_turn(record, adapter)
+                finally:
+                    fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        except Exception as exc:
+            error = f"unexpected turn failure: {type(exc).__name__}: {exc}"
+            return self._fail_turn(call_id, error)
 
     def _run_adapter_turn(self, record: CallRecord, adapter: AgentAdapter) -> dict:
         persona = self._persona_of(record)
@@ -543,7 +691,15 @@ class Switchboard:
             fresh.callee.session_id = turn.session_id or fresh.callee.session_id
             if resumed_via:
                 fresh.resumed_via = resumed_via
-            self._append(fresh, fresh.callee.agent, fresh.caller.agent, turn.text)
+            self._append(
+                fresh,
+                fresh.callee.agent,
+                fresh.caller.agent,
+                turn.text,
+                from_role="callee",
+                to_role="caller",
+                usage=turn.usage,
+            )
             fresh.status = "answered"
             if fresh.caller.agent not in fresh.unread_for:
                 fresh.unread_for.append(fresh.caller.agent)
@@ -553,6 +709,7 @@ class Switchboard:
             "status": "answered",
             "from": record.callee.agent,
             "response": turn.text,
+            "usage": turn.usage,
         }
 
     def _fail_turn(self, call_id: str, error: str) -> dict:
@@ -579,6 +736,7 @@ class Switchboard:
                         "status": "answered",
                         "from": record.callee.agent,
                         "response": final.body if final else "",
+                        "usage": final.usage if final else {},
                     }
                 if record.status == "failed":
                     return {"call_id": call_id, "status": "failed", "error": record.last_error}

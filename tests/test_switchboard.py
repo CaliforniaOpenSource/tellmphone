@@ -1,6 +1,5 @@
 import subprocess
 import threading
-import time
 
 from tellmphone.config import CALL_ID_ENV, HOME_ENV, HOP_ENV, Config
 from tellmphone.switchboard import Switchboard
@@ -138,7 +137,6 @@ def test_concurrent_replies_do_not_double_spawn(boards, fake_adapter, project, s
     caller, _ = boards
     placed = caller.place_call("fake", "first", project)
     finish_turn(caller, placed["call_id"])
-    fake_adapter.delay = 0.2
     barrier = threading.Barrier(2)
     results = []
 
@@ -179,11 +177,18 @@ def test_lost_session_falls_back_to_replay(boards, fake_adapter, project, store)
 
 def test_hang_up_mid_turn_stays_closed(boards, fake_adapter, project, store):
     caller, _ = boards
-    fake_adapter.delay = 0.4
-    result = caller.place_call("fake", "slow one", project, timeout_s=0.05)
+    fake_adapter.release = threading.Event()
+    result = caller.place_call("fake", "slow one", project)
     assert result["status"] == "ringing"
+    worker = threading.Thread(target=finish_turn, args=(caller, result["call_id"]))
+    worker.start()
+    assert fake_adapter.started.wait(timeout=1)
+
     caller.hang_up(result["call_id"], reason="changed my mind")
-    finish_turn(caller, result["call_id"])
+    fake_adapter.release.set()
+    worker.join(timeout=1)
+
+    assert not worker.is_alive()
     record = store.load_call(result["call_id"])
     assert record.status == "closed"  # the late answer must not reopen the call
     assert record.unread_for == []
@@ -192,8 +197,7 @@ def test_hang_up_mid_turn_stays_closed(boards, fake_adapter, project, store):
 
 def test_async_answer_goes_to_mailbox(boards, fake_adapter, project, store):
     caller, _ = boards
-    fake_adapter.delay = 0.4
-    result = caller.place_call("fake", "slow one", project, timeout_s=0.05)
+    result = caller.place_call("fake", "slow one", project)
     assert result["status"] == "ringing"
     finish_turn(caller, result["call_id"])
     record = store.load_call(result["call_id"])
@@ -204,11 +208,42 @@ def test_async_answer_goes_to_mailbox(boards, fake_adapter, project, store):
     assert "spawn-reply" in mailbox["unread"][0]["preview"]
 
 
-def test_progress_tool_is_compatibility_refusal(boards):
-    _, callee = boards
-    result = callee.report_progress("halfway", "call-nope")
+def test_progress_is_delivered_while_turn_is_running(
+    boards, fake_adapter, project, store
+):
+    caller, callee = boards
+    fake_adapter.release = threading.Event()
+    placed = caller.place_call("fake", "slow one", project)
+    callee.config.call_id = placed["call_id"]
+    worker = threading.Thread(target=finish_turn, args=(caller, placed["call_id"]))
+    worker.start()
+    assert fake_adapter.started.wait(timeout=1)
+
+    progress = callee.report_progress("halfway")
+
+    assert progress["status"] == "reported"
+    assert store.load_call(placed["call_id"]).status == "ringing"
+    unread = caller.check_messages(project)["unread"]
+    assert [(entry["kind"], entry["body"]) for entry in unread] == [
+        ("progress", "halfway")
+    ]
+
+    fake_adapter.release.set()
+    worker.join(timeout=1)
+    assert not worker.is_alive()
+    final = caller.check_messages(project)["unread"]
+    assert len(final) == 1
+    assert final[0]["is_final"]
+
+
+def test_progress_requires_active_call_context(boards, project):
+    caller, callee = boards
+    placed = caller.place_call("fake", "slow one", project)
+    assert callee.report_progress("halfway", placed["call_id"])["status"] == "refused"
+    caller.config.call_id = placed["call_id"]
+    result = caller.report_progress("not the callee")
     assert result["status"] == "refused"
-    assert "not supported" in result["reason"]
+    assert "only the callee" in result["reason"]
 
 
 def test_check_messages_returns_full_unread_body(boards, project):
@@ -271,6 +306,12 @@ def test_config_grant_still_works(store, home, fake_adapter, project):
     result = board.place_call("fake", "hi", project)
     finish_turn(board, result["call_id"])
     assert fake_adapter.spawns[0].write_access
+    assert store.load_call(result["call_id"]).write
+    cfg.permissions.clear()
+    fake_adapter.lose_session = True
+    reply = board.reply(result["call_id"], "keep editing")
+    finish_turn(board, reply["call_id"])
+    assert fake_adapter.spawns[1].write_access
 
 
 # ---------------------------------------------------------------- refusals
@@ -302,6 +343,16 @@ def test_self_call_uses_headless_sibling_session(boards, project):
     assert followup["status"] == "ringing"
     finish_turn(caller, followup["call_id"])
     assert claude_adapter.resumes == [("fake-sess-1", "keep going")]
+
+
+def test_self_call_mailbox_does_not_return_its_own_question(boards, project):
+    caller, _ = boards
+    placed = caller.place_call("claude", "hello me", project)
+    finish_turn(caller, placed["call_id"])
+
+    unread = caller.check_messages(project)["unread"]
+
+    assert [entry["body"] for entry in unread] == ["spawn-reply to: hello me"]
 
 
 def test_invalid_mode_refused(boards, project):
@@ -376,6 +427,18 @@ def test_hang_up_stale_ringing_call(boards, project, store):
     assert store.load_call(placed["call_id"]).status == "closed"
 
 
+def test_third_party_cannot_hang_up(boards, store, project, fake_adapter):
+    caller, _ = boards
+    placed = caller.place_call("fake", "hi", project)
+    stranger = Switchboard(
+        Config(i_am="gemini", home=store.home), store, {"fake": fake_adapter}
+    )
+
+    assert stranger.hang_up(placed["call_id"])["status"] == "error"
+    assert stranger.hang_up("*")["status"] == "error"
+    assert store.load_call(placed["call_id"]).status == "ringing"
+
+
 def test_wait_observes_final_answer(boards, project):
     caller, _ = boards
     placed = caller.place_call("fake", "hi", project)
@@ -385,6 +448,7 @@ def test_wait_observes_final_answer(boards, project):
 
     assert result["status"] == "answered"
     assert result["response"] == "spawn-reply to: hi"
+    assert result["usage"] == {"turns": 1}
     assert caller.check_messages(project)["unread"] == []
 
 
@@ -427,6 +491,29 @@ def test_detached_spawn_uses_turn_command_and_env(home, store, fake_adapter, pro
     call_dir = store.call_dir(result["call_id"])
     assert (call_dir / "turn.stdout").exists()
     assert (call_dir / "turn.stderr").exists()
+
+
+def test_unexpected_turn_failure_is_persisted(
+    home, store, fake_adapter, project, monkeypatch
+):
+    board = Switchboard(
+        Config(i_am="claude", home=home),
+        store,
+        {"fake": fake_adapter},
+        detach_turns=False,
+    )
+    placed = board.place_call("fake", "hi", project)
+
+    def explode(_request):
+        raise RuntimeError("parser exploded")
+
+    monkeypatch.setattr(fake_adapter, "spawn", explode)
+    result = board.run_turn(placed["call_id"])
+
+    assert result["status"] == "failed"
+    record = store.load_call(placed["call_id"])
+    assert record.status == "failed"
+    assert "RuntimeError: parser exploded" in record.last_error
 
 
 # ------------------------------------------------------------- answering machine
@@ -476,6 +563,30 @@ def test_third_party_cannot_reply(boards, store, project, fake_adapter):
     )
     result = stranger.reply(placed["call_id"], "let me in")
     assert result["status"] == "error"
+
+
+def test_get_call_recovers_answer_after_another_session_reads_it(
+    boards, store, project, fake_adapter
+):
+    caller, _ = boards
+    placed = caller.place_call("fake", "hi", project)
+    finish_turn(caller, placed["call_id"])
+    other_session = Switchboard(
+        Config(i_am="claude", home=store.home), store, {"fake": fake_adapter}
+    )
+    assert other_session.check_messages(project)["unread"]
+    assert caller.check_messages(project)["unread"] == []
+
+    recovered = caller.get_call(placed["call_id"])
+
+    assert recovered["status"] == "answered"
+    assert recovered["transcript"][-1]["body"] == "spawn-reply to: hi"
+    assert recovered["transcript"][-1]["usage"] == {"turns": 1}
+
+    stranger = Switchboard(
+        Config(i_am="gemini", home=store.home), store, {"fake": fake_adapter}
+    )
+    assert stranger.get_call(placed["call_id"])["status"] == "error"
 
 
 def test_phonebook(boards, store):

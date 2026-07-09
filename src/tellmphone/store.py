@@ -28,6 +28,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 CALL_ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"  # no i/l/o/u lookalikes
 CALL_ID_LENGTH = 8
+CALL_ID_RE = re.compile(rf"call-[{re.escape(CALL_ID_ALPHABET)}]{{{CALL_ID_LENGTH}}}")
 
 CallStatus = Literal["ringing", "answered", "voicemail", "closed", "failed"]
 
@@ -73,6 +74,9 @@ class TranscriptEntry(BaseModel):
     body: str
     ts: datetime
     kind: Literal["message", "progress", "system"] = "message"
+    from_role: Literal["caller", "callee", "system"] | None = None
+    to_role: Literal["caller", "callee"] | None = None
+    usage: dict = Field(default_factory=dict)
 
 
 class CallBusy(Exception):
@@ -142,6 +146,8 @@ class Store:
 
     def call_dir(self, call_id: str) -> Path:
         """Global call_id -> directory lookup (glob scan; volumes are tiny)."""
+        if not CALL_ID_RE.fullmatch(call_id):
+            raise CallNotFound(call_id)
         matches = list(self.projects_dir.glob(f"*/calls/{call_id}/call.json"))
         if not matches:
             raise CallNotFound(call_id)

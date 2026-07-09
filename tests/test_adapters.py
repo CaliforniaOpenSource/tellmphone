@@ -194,7 +194,6 @@ class TestClaudeAdapter:
             adapter.resume("lost-session", "again", req)
 
     def test_available(self, fake_bin):
-        assert not ClaudeAdapter().available() or True  # depends on host
         fake_bin("claude", FAKE_CLAUDE)
         assert ClaudeAdapter().available()
 

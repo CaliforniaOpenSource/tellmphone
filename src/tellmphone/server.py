@@ -38,7 +38,6 @@ def create_server(config: Config) -> FastMCP:
         model: str | None = None,
         context: str | None = None,
         mode: str = "wait",
-        timeout_s: int | None = None,
         write: bool = False,
     ) -> dict:
         """Place a call to a coding agent about a project.
@@ -75,12 +74,11 @@ def create_server(config: Config) -> FastMCP:
             model=model,
             context=context,
             mode=mode,
-            timeout_s=timeout_s,
             write=write,
         )
 
     @mcp.tool(title="Reply on an open call")
-    def reply(call_id: str, message: str, timeout_s: int | None = None) -> dict:
+    def reply(call_id: str, message: str) -> dict:
         """Send a follow-up message on an existing call.
 
         The callee's session is resumed with full context of the conversation
@@ -88,14 +86,15 @@ def create_server(config: Config) -> FastMCP:
         ids, check_messages lists the open calls for a project. status='busy'
         means a turn is still running; try again later.
         """
-        return switchboard.reply(call_id=call_id, message=message, timeout_s=timeout_s)
+        return switchboard.reply(call_id=call_id, message=message)
 
-    @mcp.tool(title="Report progress on your current call")
+    @mcp.tool(title="Report progress on your active call")
     def report_progress(message: str, call_id: str | None = None) -> dict:
-        """Compatibility stub.
+        """Send an intermediate update while working on a detached call.
 
-        Progress reporting is not part of the async-turn MVP. Finish the turn
-        with a final answer instead; callers poll check_messages.
+        This is only available to a callee running inside an active call. The
+        update is delivered through the caller's mailbox without completing
+        the turn; the final answer should still be returned normally.
         """
         return switchboard.report_progress(message=message, call_id=call_id)
 
@@ -110,6 +109,16 @@ def create_server(config: Config) -> FastMCP:
         human before moving on. Reply with reply(call_id).
         """
         return switchboard.check_messages(project_dir=project_dir)
+
+    @mcp.tool(title="Get a call transcript")
+    def get_call(call_id: str) -> dict:
+        """Retrieve one call and its full transcript by id.
+
+        Use this when an unread notification was consumed by another session,
+        or when you need to recover the context of an interrupted call. This
+        does not change unread state.
+        """
+        return switchboard.get_call(call_id=call_id)
 
     @mcp.tool(title="Hang up a call")
     def hang_up(call_id: str, reason: str | None = None) -> dict:
