@@ -23,6 +23,7 @@ from tellmphone.adapters.base import (
     AdapterError,
     AgentAdapter,
     AgentTurn,
+    ModelInfo,
     SessionLost,
     SpawnRequest,
     cli_register,
@@ -32,6 +33,60 @@ from tellmphone.adapters.base import (
 
 _SESSION_KEYS = ("session_id", "thread_id", "conversation_id")
 _ERROR_EVENT_TYPES = {"error", "turn.failed"}
+
+# Passable `codex exec --model` / `-m` slugs (ChatGPT-auth Codex, mid-2026).
+# Descriptions are TeLLMphone *call* routing (second opinions + personalities).
+# Probed: gpt-5.6-{sol,terra,luna}, gpt-5.5, gpt-5.4, gpt-5.4-mini,
+# gpt-5.3-codex-spark. Bare `gpt-5.6` rejected. codex-auto-review is guardian-only.
+# Preferred independent review vendor when the caller is Claude (hostile roles).
+_MODELS = (
+    ModelInfo(
+        "gpt-5.6-terra",
+        "Default Codex callee for routine grumpy-reviewer, sycophancy-cop, "
+        "evidence-engineer, test-engineer, the-algorithm, and neutral second "
+        "opinions. Prefer when the caller is Claude and needs a hostile "
+        "review (personality supplies the adversarial stance; model "
+        "choice alone does not). Use Sol for security-sensitive changes, "
+        "risky diffs, ambiguous cross-system bugs, or devils-advocate on a "
+        "high-stakes plan; use Luna or Spark for rubber-duck and tiny-hacker.",
+        default=True,
+    ),
+    ModelInfo(
+        "gpt-5.6-sol",
+        "Hard Codex callee: security-auditor, grumpy-reviewer on risky or "
+        "security-impacting diffs, devils-advocate, debugger on ambiguous "
+        "systems bugs. Highest cost — pick on pre-call risk (auth boundaries, "
+        "irreversible migration, multi-service failure modes), not after a "
+        "weak Terra answer. Strong on systems/backend review and instruction "
+        "fidelity; do not pick Sol solely for UI polish. Not for architect: "
+        "route hard design judgment to claude opus or fable.",
+    ),
+    ModelInfo(
+        "gpt-5.6-luna",
+        "Cheap Codex leaf for phone calls. Prefer for rubber-duck and "
+        "tiny-hacker (smallest runnable proof). Not for security-auditor, "
+        "grumpy-reviewer, architect, or sycophancy-cop.",
+    ),
+    ModelInfo(
+        "gpt-5.5",
+        "Previous frontier. Use only if 5.6 slugs are unavailable; same call "
+        "roles as Sol/Terra when you must pin a legacy pipeline.",
+    ),
+    ModelInfo(
+        "gpt-5.4",
+        "Legacy mid-tier. Prefer gpt-5.6-terra for new TeLLMphone calls.",
+    ),
+    ModelInfo(
+        "gpt-5.4-mini",
+        "Legacy cheap leaf. Prefer gpt-5.6-luna for rubber-duck / tiny-hacker.",
+    ),
+    ModelInfo(
+        "gpt-5.3-codex-spark",
+        "Ultra-fast implementer for tiny-hacker and quick mechanical edits "
+        "after another model or plan already decided what to build. Weak for "
+        "review, security, architect, or devils-advocate. Often plan-gated.",
+    ),
+)
 
 
 def _find_session_id(event: object) -> str | None:
@@ -82,6 +137,9 @@ class CodexAdapter(AgentAdapter):
 
     def available(self) -> bool:
         return shutil.which("codex") is not None
+
+    def models(self) -> list[ModelInfo]:
+        return list(_MODELS)
 
     def register_mcp(self, server_argv: list[str]) -> str:
         result = cli_register(
@@ -168,6 +226,18 @@ class CodexAdapter(AgentAdapter):
                 "--skip-git-repo-check",
                 "--output-last-message", last_msg.name,
             ]
+            # Codex resume does not reliably propagate the parent process's
+            # dynamic call context to stdio MCP servers.  Pin it in the MCP
+            # server config for this process so report_progress keeps working.
+            if req.call_id:
+                cmd += [
+                    "--config",
+                    "mcp_servers.tellmphone.env.TELLMPHONE_CALL_ID="
+                    + json.dumps(req.call_id),
+                    "--config",
+                    "mcp_servers.tellmphone.env.TELLMPHONE_HOP="
+                    + json.dumps(str(req.hop_count)),
+                ]
             if not resuming:
                 # cwd and sandbox are session properties: settable at spawn,
                 # rejected (and inherited) on `exec resume`

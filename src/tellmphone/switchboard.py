@@ -257,6 +257,8 @@ class Switchboard:
         return {
             "call_id": record.call_id,
             "status": "answered",
+            "from": record.callee.agent,
+            "response": message,
             "note": f"reply delivered to {record.caller.agent}'s mailbox for this project",
         }
 
@@ -461,17 +463,31 @@ class Switchboard:
     # ------------------------------------------------------------ phonebook
 
     def phonebook(self) -> dict:
-        return {
-            "you_are": self.config.i_am,
-            "agents": [
+        agents = []
+        for name, adapter in sorted(self.adapters.items()):
+            configured = self.config.default_model_for(name)
+            # One default only: models[].default is the catalog suggestion.
+            # configured_model is what TeLLMphone actually injects when call()
+            # omits model= (null → CLI's own default).
+            models = [
+                {
+                    "id": m.id,
+                    "description": m.description,
+                    "default": m.default,
+                }
+                for m in adapter.models()
+            ]
+            agents.append(
                 {
                     "name": name,
                     "available": adapter.available(),
-                    "default_model": self.config.default_model_for(name)
-                    or "(CLI default)",
+                    "configured_model": configured,
+                    "models": models,
                 }
-                for name, adapter in sorted(self.adapters.items())
-            ],
+            )
+        return {
+            "you_are": self.config.i_am,
+            "agents": agents,
             "personalities": [
                 {"name": p.name, "description": p.description, "source": p.source}
                 for p in self.personalities.all()

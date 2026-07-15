@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import os
 import shlex
-import shutil
 import sys
 from pathlib import Path
 
@@ -15,23 +14,13 @@ from tellmphone import __version__
 def _serve_argv(agent: str, override: str | None) -> list[str]:
     """Build the serve command an agent's MCP config should launch.
 
-    Priority: explicit --serve-command; a source checkout (run via uv);
-    an installed `tellmphone` executable; `uvx` as the last resort.
+    Use the interpreter currently running tellmphone.  It already has the
+    package and dependencies available, and unlike `uv run` it can start from
+    inside a callee's read-only sandbox without needing a writable uv cache.
     """
     if override:
         return [*shlex.split(override), "--i-am", agent]
-
-    import tellmphone
-
-    root = Path(tellmphone.__file__).resolve().parents[2]
-    if (root / "pyproject.toml").exists() and shutil.which("uv"):
-        return ["uv", "run", "--project", str(root),
-                "tellmphone", "serve", "--i-am", agent]
-
-    exe = shutil.which("tellmphone")
-    if exe:
-        return [exe, "serve", "--i-am", agent]
-    return ["uvx", "tellmphone", "serve", "--i-am", agent]
+    return [sys.executable, "-m", "tellmphone.cli", "serve", "--i-am", agent]
 
 
 def _make_switchboard(i_am: str):

@@ -2,6 +2,7 @@
 
 import json
 import shlex
+import sys
 
 from tellmphone.adapters.claude import ClaudeAdapter
 from tellmphone.adapters.codex import CodexAdapter
@@ -97,6 +98,13 @@ def test_grok_register(fake_bin, tmp_path):
     assert log.read_text().strip() == (
         "mcp add tellmphone -- uvx tellmphone serve --i-am grok"
     )
+    sandbox = (tmp_path / "grok-home" / "sandbox.toml").read_text()
+    assert "[profiles.tellmphone-read-only]" in sandbox
+    assert "[profiles.tellmphone-workspace]" in sandbox
+    assert str((tmp_path / "tellmphone-home").resolve()) in sandbox
+
+    GrokAdapter().unregister_mcp()
+    assert not (tmp_path / "grok-home" / "sandbox.toml").exists()
 
 
 def test_register_replaces_existing(fake_bin, tmp_path):
@@ -127,8 +135,9 @@ def test_install_command_hits_all_detected_agents(fake_bin, tmp_path, capsys):
     assert "--i-am claude" in claude_log.read_text()
     assert "--i-am codex" in codex_log.read_text()
     assert "--i-am grok" in grok_log.read_text()
-    # source checkout detected -> registered command runs via uv
-    assert shlex.split(claude_log.read_text())[6] == "uv"
+    # The exact active interpreter avoids package-manager cache writes when an
+    # agent launches the MCP server inside a read-only sandbox.
+    assert sys.executable in shlex.split(claude_log.read_text())
 
 
 def test_install_single_agent(fake_bin, tmp_path, capsys):

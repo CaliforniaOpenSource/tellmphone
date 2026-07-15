@@ -128,8 +128,15 @@ full transcript without changing unread state.
 `hang_up` is logical: it marks the call `closed` but does not kill an agent CLI.
 A late turn must re-read the record and must never reopen a closed call.
 
-`phonebook` reports installed adapters, availability, configured models, and
-personalities.
+`phonebook` reports installed adapters, availability, optional
+`configured_model` from config.toml, a hardcoded per-adapter models catalog
+(CLI-passable `id`, call-routing notes, exactly one `default=true` suggestion),
+and personalities. Catalog descriptions steer callers toward models that fit
+TeLLMphone usage (second opinions + named personalities): e.g. Codex for
+non-sycophantic review roles when the caller is Claude, Claude sonnet for
+general sparring, opus/fable for architect/deep debugger, cheap leaves for
+rubber-duck/tiny-hacker. Catalogs list only strings safe to pass as the CLI
+model flag; they are not auto-applied when `call` omits `model`.
 
 If a detached turn cannot start or raises an unexpected exception, the call
 must become `failed` with `last_error`; it must not remain indefinitely
@@ -180,6 +187,8 @@ There is no MCP tool for writing personalities. They are human-managed input.
 An adapter is a small subprocess wrapper. It owns:
 
 - CLI availability detection;
+- a static models catalog (`models()`) used by `phonebook` so callers can
+  pick valid `--model` ids without guessing;
 - MCP registration and removal where supported;
 - argv, cwd, sandbox, and environment construction;
 - first-turn spawn and native-session resume;

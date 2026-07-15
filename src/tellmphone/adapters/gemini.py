@@ -13,9 +13,70 @@ from tellmphone.adapters.base import (
     AdapterError,
     AgentAdapter,
     AgentTurn,
+    ModelInfo,
     SessionLost,
     SpawnRequest,
     framed_personality_preamble,
+)
+
+# Exact `agy --model` display names from `agy models` (slug-style ids rejected).
+# Descriptions are TeLLMphone *call* routing (second opinions + personalities).
+# Low/Medium/High are effort on the same family. Flash is the Antigravity default.
+_MODELS = (
+    ModelInfo(
+        "Gemini 3.5 Flash (Medium)",
+        "Default Gemini/agy callee for phone calls. Good neutral third voice and "
+        "general sparring under a clear ask; start here before High/Pro. Prefer "
+        "codex terra/sol for hostile reviews (grumpy-reviewer, sycophancy-cop, "
+        "devils-advocate when the caller is Claude) and claude opus/fable for "
+        "architect when you need max design judgment.",
+        default=True,
+    ),
+    ModelInfo(
+        "Gemini 3.5 Flash (Low)",
+        "Quota-saver for short calls. Prefer for rubber-duck and tiny mechanical "
+        "asks. Use Medium/High only when the task is multi-file or needs more "
+        "careful reasoning.",
+    ),
+    ModelInfo(
+        "Gemini 3.5 Flash (High)",
+        "Higher-effort Flash for multi-file debugger or test-engineer style "
+        "calls when Gemini is the available provider. Quota-heavy on Pro plans — "
+        "deliberate pick, not silent default.",
+    ),
+    ModelInfo(
+        "Gemini 3.1 Pro (Low)",
+        "Pro-class with light thinking tax for evidence-engineer or careful "
+        "review when you want more steadiness than Flash without max burn.",
+    ),
+    ModelInfo(
+        "Gemini 3.1 Pro (High)",
+        "Deep Gemini option for a second opinion on a complex diff, architecture "
+        "proposal, or ambiguous debugging evidence when Gemini is the available "
+        "provider. Pair with grumpy-reviewer, architect, or debugger. For the "
+        "strongest Claude design path, choose opus or fable; for hostile review "
+        "when the caller is Claude, prefer codex terra/sol. Shares Gemini quota "
+        "with Flash and burns faster.",
+    ),
+    ModelInfo(
+        "Claude Sonnet 4.6 (Thinking)",
+        "Claude-via-agy Sonnet: transaction-cost-accountant, careful review, "
+        "docs, plan-then-hand-off when you only have agy. Often Ultra-gated. "
+        "Prefer native claude sonnet when the Claude CLI is installed.",
+    ),
+    ModelInfo(
+        "Claude Opus 4.6 (Thinking)",
+        "Claude-via-agy hard tier: architect, deep debugger, high-stakes design "
+        "trade-offs — same call roles as native opus/fable. Scarce quota; not for "
+        "rubber-duck or renames. Prefer native claude opus or fable when available.",
+    ),
+    ModelInfo(
+        "GPT-OSS 120B (Medium)",
+        "Third opinion with no shared training lineage to Gemini or Claude — "
+        "use for neutral or the-algorithm when Gemini/Claude buckets are tight "
+        "and you want a different blind-spot profile. Often Ultra-gated. Do not "
+        "use for tiny-hacker (prefer luna/spark/composer) or security-auditor.",
+    ),
 )
 
 
@@ -24,6 +85,9 @@ class GeminiAdapter(AgentAdapter):
 
     def available(self) -> bool:
         return shutil.which("agy") is not None
+
+    def models(self) -> list[ModelInfo]:
+        return list(_MODELS)
 
     def register_mcp(self, server_argv: list[str]) -> str:
         path = self._mcp_config_path()

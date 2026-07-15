@@ -28,7 +28,12 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 CALL_ID_ALPHABET = "0123456789abcdefghjkmnpqrstvwxyz"  # no i/l/o/u lookalikes
 CALL_ID_LENGTH = 8
-CALL_ID_RE = re.compile(rf"call-[{re.escape(CALL_ID_ALPHABET)}]{{{CALL_ID_LENGTH}}}")
+# Older releases used four-character ids.  Keep accepting those on lookup so
+# one historical record cannot break the mailbox scan for an entire project.
+# The alphabet-only match still prevents path/glob injection; new ids remain 8.
+CALL_ID_RE = re.compile(
+    rf"call-[{re.escape(CALL_ID_ALPHABET)}]{{4,{CALL_ID_LENGTH}}}"
+)
 
 CallStatus = Literal["ringing", "answered", "voicemail", "closed", "failed"]
 

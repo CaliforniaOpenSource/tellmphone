@@ -536,6 +536,8 @@ def test_voicemail_full_loop(boards, fake_adapter, project, store):
     # callee answers without any subprocess
     answer = callee.reply(left["call_id"], "pong, saw it")
     assert answer["status"] == "answered"
+    assert answer["from"] == "fake"
+    assert answer["response"] == "pong, saw it"
     assert fake_adapter.spawns == [] and fake_adapter.resumes == []
 
     # caller finds the reply
@@ -596,5 +598,6 @@ def test_phonebook(boards, store):
     assert book["you_are"] == "claude"
     fake_entry = next(a for a in book["agents"] if a["name"] == "fake")
     assert fake_entry["available"] is True
-    assert fake_entry["default_model"] == "(CLI default)"
+    assert fake_entry["configured_model"] is None
+    assert fake_entry["models"] == []  # FakeAdapter has no catalog
     assert any(p["name"] == "grumpy" for p in book["personalities"])

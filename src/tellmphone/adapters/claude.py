@@ -11,6 +11,7 @@ from tellmphone.adapters.base import (
     AdapterError,
     AgentAdapter,
     AgentTurn,
+    ModelInfo,
     SessionLost,
     SpawnRequest,
     cli_register,
@@ -20,12 +21,85 @@ from tellmphone.adapters.base import (
 _USAGE_KEYS = ("total_cost_usd", "duration_ms", "num_turns")
 _TELLMPHONE_TOOLS = f"mcp__{SERVER_NAME}__*"
 
+# Passable `claude --model` values (aliases preferred; resolve per account).
+# Descriptions are TeLLMphone *call* routing (second opinions + personalities),
+# not daily-IDE defaults. Probed aliases: sonnet/opus/haiku/best/opusplan/*[1m].
+# `fable` may be account-gated; `claude-fable-5` is the explicit pin if rejected.
+_MODELS = (
+    ModelInfo(
+        "sonnet",
+        "Default Claude callee for transaction-cost-accountant, test-engineer, "
+        "neutral second opinions, and UI/CSS or design-taste questions. Use "
+        "opus or fable for architecture, ambiguous root-cause analysis, or "
+        "subtle cross-system behavior. If the caller is Claude and needs "
+        "hostile review, prefer codex terra/sol with grumpy-reviewer, "
+        "sycophancy-cop, or devils-advocate.",
+        default=True,
+    ),
+    ModelInfo(
+        "opus",
+        "Reliable hard Claude tier: architect, debugger (ambiguous root-cause), "
+        "deep design trade-offs, subtle multi-system bugs. Use when the call "
+        "needs high judgment density and you want a known available hard pin. "
+        "Fable is the max-capability alternative where the account allows it.",
+    ),
+    ModelInfo(
+        "haiku",
+        "Cheap short-form Claude callee. Prefer for rubber-duck (Socratic, "
+        "must not over-solve) and tiny mechanical asks. Not for grumpy-reviewer, "
+        "security-auditor, architect, or any role that needs ranked defects.",
+    ),
+    ModelInfo(
+        "fable",
+        "Max Claude hard tier alongside opus: architect, hardest debugger, "
+        "strategy-then-hand-off, longest-horizon design critique. Expensive and "
+        "account-gated — if the fable alias is rejected, pass claude-fable-5. "
+        "Prefer over sonnet only for true frontier-judgment calls.",
+    ),
+    ModelInfo(
+        "claude-fable-5",
+        "Pinned Fable 5 id when `fable` is rejected or you need a reproducible "
+        "frontier pin. Same call roles as fable/opus (architect, deep debugger, "
+        "high-stakes design sparring). Account-gated.",
+    ),
+    ModelInfo(
+        "best",
+        "Account-resolved strongest alias — may resolve to Opus or Fable "
+        "depending on plan/account; do not assume which. Use only when you want "
+        "max available without naming a family. For a guaranteed Fable-tier "
+        "call, name fable or claude-fable-5; for a reliable hard pin, use opus.",
+    ),
+    ModelInfo(
+        "opusplan",
+        "Hybrid: Opus while planning, Sonnet while implementing. Use for an "
+        "architect or neutral call that must turn a design decision into a "
+        "draft patch. For planning-only calls needing the strongest Claude "
+        "judgment, choose fable or opus directly (fable is max-capability). "
+        "Not a substitute for grumpy-reviewer.",
+    ),
+    ModelInfo(
+        "sonnet[1m]",
+        "Sonnet with explicit 1M context for huge monorepos or long call "
+        "transcripts. Same personality fits as sonnet; use when the working set "
+        "is the bottleneck (often a no-op if Sonnet is already 1M).",
+    ),
+    ModelInfo(
+        "opus[1m]",
+        "Opus with explicit 1M context for architect/debugger calls that need a "
+        "very large working set. Same hard-call roles as opus/fable; pick fable "
+        "or claude-fable-5 if you need max capability instead of long context.",
+    ),
+)
+
 
 class ClaudeAdapter(AgentAdapter):
     name = "claude"
 
     def available(self) -> bool:
         return shutil.which("claude") is not None
+
+    def models(self) -> list[ModelInfo]:
+        return list(_MODELS)
 
     def register_mcp(self, server_argv: list[str]) -> str:
         return cli_register(

@@ -72,6 +72,26 @@ class AgentTurn:
     usage: dict = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class ModelInfo:
+    """A model id the CLI accepts via --model, with guidance for callers.
+
+    `id` must be a string safe to pass as the CLI's model flag. Catalogs are
+    hardcoded and periodically refreshed — prefer what `cli models` / probes
+    accept over marketing names.
+
+    `description` is TeLLMphone call routing: which personalities and second-
+    opinion shapes fit this model, when to escalate tier, and when to prefer
+    another vendor (not generic IDE marketing copy).
+    """
+
+    id: str
+    description: str
+    # Exactly one entry per adapter should be True: the suggested pick when
+    # the caller has no preference and TeLLMphone has no configured_model.
+    default: bool = False
+
+
 class AgentAdapter(ABC):
     name: str = ""
 
@@ -86,6 +106,22 @@ class AgentAdapter(ABC):
     @abstractmethod
     def resume(self, session_id: str, message: str, req: SpawnRequest) -> AgentTurn:
         """Follow-up on an existing session. Raises SessionLost if it's gone."""
+
+    def models(self) -> list[ModelInfo]:
+        """Passable --model values for this CLI (hardcoded, periodically refreshed).
+
+        Callers use this via phonebook to pick a valid model without guessing.
+        Empty means TeLLMphone has no catalog; omit `model` on call() and let
+        the CLI choose.
+        """
+        return []
+
+    def catalog_default_model(self) -> str | None:
+        """Id marked default in models(), if any."""
+        for model in self.models():
+            if model.default:
+                return model.id
+        return None
 
     def child_env(self, req: SpawnRequest) -> dict[str, str]:
         """Scrubbed environment plus the hop count, so a callee's own

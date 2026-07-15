@@ -73,7 +73,7 @@ The tools the agents get:
 | `get_call` | Recover one call's metadata and full transcript without changing unread state. |
 | `report_progress` | Let an active callee send intermediate updates without finishing its turn. |
 | `hang_up` | Close a call. The transcript is kept. |
-| `phonebook` | List available agents and personalities. |
+| `phonebook` | List available agents, model catalogs (id + call/personality routing; one default), and personalities. |
 
 ## How it works
 

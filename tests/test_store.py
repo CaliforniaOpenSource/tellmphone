@@ -37,6 +37,13 @@ def test_call_roundtrip(store, project):
     assert loaded.status == "ringing"
 
 
+def test_legacy_short_call_id_roundtrip(store, project):
+    record = make_record(project, call_id="call-91pq")
+    store.create_call(record)
+
+    assert store.load_call("call-91pq").call_id == "call-91pq"
+
+
 def test_load_unknown_call(store, project):
     store.project_box(project)
     with pytest.raises(CallNotFound):

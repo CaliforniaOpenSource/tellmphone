@@ -48,10 +48,13 @@ def create_server(config: Config) -> FastMCP:
         `message` and any background in `context`. Pick a `personality` from
         the phonebook to shape the callee (e.g. 'grumpy-reviewer'), or omit
         for its default behavior. `model` independently picks which model the
-        callee runs (e.g. 'opus' for claude, 'gpt-5.1-codex' for codex) — it
-        is pinned for the whole call, so follow-up replies keep talking to
-        the same model; omit it for the callee's default. Don't guess model
-        names: omit unless you know a valid one for that agent.
+        callee runs — it is pinned for the whole call, so follow-up replies
+        keep talking to the same model; omit it for the callee's (or
+        TeLLMphone-configured) default. Don't guess model names: copy an
+        exact `id` from phonebook().agents[].models. Prefer default=true for
+        ordinary second opinions; read each model's description for
+        personality fit (e.g. hostile review → codex terra/sol; architect →
+        claude opus or fable; rubber-duck → cheap leaves), or omit.
 
         mode='wait' (default) starts the callee and returns status='ringing';
         poll check_messages for the answer. Live calls take minutes and burn
@@ -131,9 +134,16 @@ def create_server(config: Config) -> FastMCP:
 
     @mcp.tool(title="Look up agents & personalities")
     def phonebook() -> dict:
-        """List who you can call (agents, with availability) and the
-        personalities you can assign to a callee. Check here before calling
-        if you're unsure a personality or agent exists."""
+        """List who you can call and how to shape the call.
+
+        For each agent: availability; configured_model (TeLLMphone
+        config.toml override, or null if the CLI chooses); and models —
+        each entry's id is a string you can pass to call's model= as-is.
+        Exactly one model has default=true (catalog suggestion for ordinary
+        second opinions). Read description for personality-aware routing
+        (which roles fit this tier/vendor). Also lists personalities.
+        Check here before calling if you're unsure a personality, agent,
+        or model id exists."""
         return switchboard.phonebook()
 
     return mcp

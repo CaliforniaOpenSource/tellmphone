@@ -101,6 +101,10 @@ def fake_bin(tmp_path, monkeypatch):
     gemini_home = tmp_path / "gemini-home"
     gemini_home.mkdir()
     monkeypatch.setenv("GEMINI_HOME", str(gemini_home))
+    grok_home = tmp_path / "grok-home"
+    grok_home.mkdir()
+    monkeypatch.setenv("GROK_HOME", str(grok_home))
+    monkeypatch.setenv("TELLMPHONE_HOME", str(tmp_path / "tellmphone-home"))
 
     def install(name: str, script: str):
         path = bin_dir / name

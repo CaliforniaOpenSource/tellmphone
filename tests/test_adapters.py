@@ -70,7 +70,7 @@ print("some non-json preamble")
 print(json.dumps({"type": "session_configured", "session_id": session_id}))
 print(json.dumps({"type": "item.completed", "item": {"type": "agent_message"}}))
 with open(out_file, "w") as fh:
-    fh.write(f"codex answer to: {prompt}|model={model}")
+    fh.write(f"codex answer to: {prompt}|model={model}|argv={json.dumps(args)}")
 '''
 
 FAKE_AGY = '''#!/usr/bin/env python3
@@ -253,6 +253,18 @@ class TestCodexAdapter:
         assert "Missing environment variable: AMD_LLM_API_KEY." in message
         assert "Reading additional input from stdin" not in message
 
+    def test_call_context_is_pinned_for_mcp_on_spawn_and_resume(self, fake_bin, req):
+        fake_bin("codex", FAKE_CODEX)
+        req.call_id = "call-1a2b3c4d"
+        req.hop_count = 2
+
+        for turn in (
+            CodexAdapter().spawn(req),
+            CodexAdapter().resume("codex-sess-9", "again", req),
+        ):
+            assert 'mcp_servers.tellmphone.env.TELLMPHONE_CALL_ID=\\"call-1a2b3c4d\\"' in turn.text
+            assert 'mcp_servers.tellmphone.env.TELLMPHONE_HOP=\\"2\\"' in turn.text
+
 
 class TestGeminiAdapter:
     def test_spawn_uses_sandbox_and_prompt_last(self, fake_bin, req, project):
@@ -351,8 +363,8 @@ class TestGrokAdapter:
         assert uuid.UUID(turn.session_id)
         assert data["prompt"] == "hello there"
         assert data["cwd"] == project
-        assert data["sandbox"] == "read-only"
-        assert data["permission_mode"] == "dontAsk"
+        assert data["sandbox"] == "tellmphone-read-only"
+        assert data["permission_mode"] == "auto"
         assert "--no-auto-update" in data["argv"]
         assert "--no-alt-screen" in data["argv"]
         assert "--session-id" in data["argv"]
@@ -361,8 +373,8 @@ class TestGrokAdapter:
         fake_bin("grok", FAKE_GROK)
         req.write_access = True
         data = json.loads(GrokAdapter().spawn(req).text)
-        assert data["sandbox"] == "workspace"
-        assert data["permission_mode"] == "acceptEdits"
+        assert data["sandbox"] == "tellmphone-workspace"
+        assert data["permission_mode"] == "auto"
 
     def test_model_flag(self, fake_bin, req):
         fake_bin("grok", FAKE_GROK)
@@ -397,3 +409,33 @@ class TestGrokAdapter:
     def test_available(self, fake_bin):
         fake_bin("grok", FAKE_GROK)
         assert GrokAdapter().available()
+
+
+@pytest.mark.parametrize(
+    "adapter_cls,expected_default,must_include,must_exclude",
+    [
+        (ClaudeAdapter, "sonnet", "opus", ("codex-auto-review",)),
+        (CodexAdapter, "gpt-5.6-terra", "gpt-5.6-sol", ("codex-auto-review", "gpt-5.6")),
+        (
+            GeminiAdapter,
+            "Gemini 3.5 Flash (Medium)",
+            "Gemini 3.5 Flash (Low)",
+            ("gemini-3.5-flash",),
+        ),
+        (GrokAdapter, "grok-4.5", "grok-composer-2.5-fast", ("grok-4.3", "grok-build")),
+    ],
+)
+def test_model_catalog(adapter_cls, expected_default, must_include, must_exclude):
+    models = adapter_cls().models()
+    assert models
+    ids = [m.id for m in models]
+    assert expected_default in ids
+    assert must_include in ids
+    for banned in must_exclude:
+        assert banned not in ids
+    assert adapter_cls().catalog_default_model() == expected_default
+    defaults = [m for m in models if m.default]
+    assert len(defaults) == 1
+    assert all(m.description.strip() for m in models)
+    # ids must be CLI-passable strings (no empty / whitespace-only)
+    assert all(m.id.strip() == m.id and m.id for m in models)
